@@ -65,7 +65,6 @@ func NewMux(sendFrame func(*protocol.Frame)) *Mux {
 		done:      make(chan struct{}),
 	}
 	go m.gcLoop()
-	go m.keepaliveLoop()
 	return m
 }
 
@@ -208,19 +207,6 @@ func (m *Mux) gc() {
 	}
 }
 
-// keepaliveLoop sends keepalive frames every 30 seconds.
-func (m *Mux) keepaliveLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			m.sendFrame(&protocol.Frame{Type: protocol.TypeKeepalive})
-		case <-m.done:
-			return
-		}
-	}
-}
 
 func (m *Mux) Stop() {
 	close(m.done)
