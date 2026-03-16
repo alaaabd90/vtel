@@ -26,8 +26,8 @@ type Client struct {
 	pending   map[uint32]chan struct{}
 }
 
-func NewClient(api *telegram.API, peerBotID, channelID int64, listenAddr string) *Client {
-	sender := telegram.NewSender(api, channelID)
+func NewClient(api *telegram.API, myBotID, peerBotID, channelID int64, listenAddr string) *Client {
+	sender := telegram.NewSender(api, myBotID, channelID)
 
 	c := &Client{
 		api:        api,

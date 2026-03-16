@@ -13,21 +13,24 @@ const (
 // Sender sends batches to Telegram with rate limiting.
 type Sender struct {
 	api       *API
+	botID     int64
 	channelID int64
 	limiter   *RateLimiter
 }
 
-func NewSender(api *API, channelID int64) *Sender {
+func NewSender(api *API, botID int64, channelID int64) *Sender {
 	return &Sender{
 		api:       api,
+		botID:     botID,
 		channelID: channelID,
 		limiter:   NewRateLimiter(),
 	}
 }
 
 // Send sends a compressed batch as a document. Handles rate limiting and retries.
+// Filename encodes the sender bot ID so each poller can ignore its own messages.
 func (s *Sender) Send(seq uint64, data []byte) error {
-	filename := fmt.Sprintf("b_%012d.bin.gz", seq)
+	filename := fmt.Sprintf("%d_%012d.bin.gz", s.botID, seq)
 	backoff := senderInitialBackoff
 
 	for attempt := 0; ; attempt++ {

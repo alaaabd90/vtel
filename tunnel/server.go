@@ -18,8 +18,8 @@ type Server struct {
 	api     *telegram.API
 }
 
-func NewServer(api *telegram.API, peerBotID, channelID int64) *Server {
-	sender := telegram.NewSender(api, channelID)
+func NewServer(api *telegram.API, myBotID, peerBotID, channelID int64) *Server {
+	sender := telegram.NewSender(api, myBotID, channelID)
 
 	s := &Server{
 		api:    api,

@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+
 const (
 	pollerInitialBackoff = 1 * time.Second
 	pollerMaxBackoff     = 30 * time.Second
@@ -84,8 +85,10 @@ func (p *Poller) Run() {
 			if cp.Document == nil {
 				continue
 			}
-			// Filename format: b_<12-digit-seq>.bin.gz
-			if !strings.HasPrefix(cp.Document.FileName, "b_") || !strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
+			// Filename format: {peerBotID}_{seq:012d}.bin.gz
+			// Filtering by peer bot ID prefix prevents processing our own messages.
+			peerPrefix := fmt.Sprintf("%d_", p.peerBotID)
+			if !strings.HasPrefix(cp.Document.FileName, peerPrefix) || !strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
 				continue
 			}
 			docs = append(docs, docUpdate{

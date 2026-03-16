@@ -29,7 +29,7 @@ func main() {
 
 	switch cfg.Mode {
 	case "client":
-		c := tunnel.NewClient(api, cfg.PeerBotID, cfg.ChannelID, cfg.ListenAddr)
+		c := tunnel.NewClient(api, me.ID, cfg.PeerBotID, cfg.ChannelID, cfg.ListenAddr)
 		go func() {
 			<-sigCh
 			fmt.Println("\n[teltun] shutting down...")
@@ -42,7 +42,7 @@ func main() {
 		}
 
 	case "server":
-		s := tunnel.NewServer(api, cfg.PeerBotID, cfg.ChannelID)
+		s := tunnel.NewServer(api, me.ID, cfg.PeerBotID, cfg.ChannelID)
 		go func() {
 			<-sigCh
 			fmt.Println("\n[teltun] shutting down...")
