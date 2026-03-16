@@ -83,7 +83,7 @@ func (m *Mux) NewConn() *Conn {
 	}
 	c := &Conn{
 		ID:       id,
-		DataCh:   make(chan []byte, 256),
+		DataCh:   make(chan []byte, 512),
 		CloseCh:  make(chan struct{}),
 		lastUsed: time.Now(),
 	}
@@ -97,7 +97,7 @@ func (m *Mux) RegisterConn(id uint32) *Conn {
 	defer m.mu.Unlock()
 	c := &Conn{
 		ID:       id,
-		DataCh:   make(chan []byte, 256),
+		DataCh:   make(chan []byte, 512),
 		CloseCh:  make(chan struct{}),
 		lastUsed: time.Now(),
 	}
@@ -146,8 +146,10 @@ func (m *Mux) HandleFrame(f *protocol.Frame) {
 		c.MarkUsed()
 		select {
 		case c.DataCh <- f.Payload:
-		default:
-			fmt.Printf("[mux] conn %08x data channel full, dropping\n", f.ConnID)
+		case <-time.After(30 * time.Second):
+			fmt.Printf("[mux] conn %08x data channel stalled for 30s, closing\n", f.ConnID)
+			c.Close()
+		case <-c.CloseCh:
 		}
 	case protocol.TypeClose:
 		c := m.GetConn(f.ConnID)
@@ -228,7 +230,7 @@ func (m *Mux) Stop() {
 func (m *Mux) Relay(netConn net.Conn, tunnelConn *Conn) {
 	// net -> tunnel
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, 128*1024)
 		for {
 			n, err := netConn.Read(buf)
 			if n > 0 {

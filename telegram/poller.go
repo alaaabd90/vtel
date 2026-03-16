@@ -4,6 +4,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+)
+
+const (
+	pollerInitialBackoff = 1 * time.Second
+	pollerMaxBackoff     = 30 * time.Second
 )
 
 // Poller long-polls for channel_post updates from the peer bot.
@@ -21,7 +27,7 @@ func NewPoller(api *API, peerBotID int64, channelID int64) *Poller {
 		api:       api,
 		peerBotID: peerBotID,
 		channelID: channelID,
-		recvCh:    make(chan []byte, 64),
+		recvCh:    make(chan []byte, 128),
 		done:      make(chan struct{}),
 	}
 }
@@ -31,6 +37,8 @@ func (p *Poller) RecvChan() <-chan []byte {
 }
 
 func (p *Poller) Run() {
+	errorBackoff := pollerInitialBackoff
+
 	for {
 		select {
 		case <-p.done:
@@ -40,9 +48,19 @@ func (p *Poller) Run() {
 
 		updates, err := p.api.GetUpdates(p.offset, 30)
 		if err != nil {
-			fmt.Printf("[poller] getUpdates error: %v\n", err)
+			fmt.Printf("[poller] getUpdates error: %v (retry in %v)\n", err, errorBackoff)
+			select {
+			case <-time.After(errorBackoff):
+			case <-p.done:
+				return
+			}
+			errorBackoff *= 2
+			if errorBackoff > pollerMaxBackoff {
+				errorBackoff = pollerMaxBackoff
+			}
 			continue
 		}
+		errorBackoff = pollerInitialBackoff // reset on success
 
 		// Sort updates by batch sequence (filename) for ordering
 		type docUpdate struct {
@@ -63,17 +81,10 @@ func (p *Poller) Run() {
 			if cp.Chat.ID != p.channelID {
 				continue
 			}
-			// In channels, messages from bots have sender_chat set to the channel.
-			// We identify peer bot messages by: the message has a document with our naming convention
-			// AND it wasn't sent by us (we don't process our own messages).
-			// Since both bots post to the same channel, we need to filter.
-			// Bot API: in channels, "from" field may or may not be present.
-			// We use a simple approach: if the message has a document with our filename pattern, process it.
-			// The peer bot sends with a specific prefix to identify itself.
 			if cp.Document == nil {
 				continue
 			}
-			// Filename format: b_<seq>.bin.gz
+			// Filename format: b_<12-digit-seq>.bin.gz
 			if !strings.HasPrefix(cp.Document.FileName, "b_") || !strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
 				continue
 			}
@@ -84,7 +95,7 @@ func (p *Poller) Run() {
 			})
 		}
 
-		// Sort by filename (which encodes sequence number) to ensure ordering
+		// Sort by filename (fixed-width sequence number ensures correct lexicographic order)
 		sort.Slice(docs, func(i, j int) bool {
 			return docs[i].fileName < docs[j].fileName
 		})

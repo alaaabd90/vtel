@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/teltun/teltun/protocol"
 	"github.com/teltun/teltun/socks5"
@@ -106,7 +107,7 @@ func (c *Client) handleSOCKS(conn net.Conn, req *socks5.ConnectRequest) {
 
 	fmt.Printf("[client] CONNECT %08x -> %s\n", tc.ID, req.String())
 
-	// Wait for ACK
+	// Wait for ACK (30s timeout)
 	select {
 	case <-ackCh:
 		// Success - send SOCKS5 success and start relay
@@ -118,8 +119,16 @@ func (c *Client) handleSOCKS(conn net.Conn, req *socks5.ConnectRequest) {
 		}
 		c.mux.Relay(conn, tc)
 	case <-tc.CloseCh:
-		// Connection was rejected
+		// Connection was rejected by server
 		socks5.SendFailure(conn)
+		c.mux.RemoveConn(tc.ID)
+	case <-time.After(30 * time.Second):
+		fmt.Printf("[client] CONNECT_ACK timeout for %08x\n", tc.ID)
+		c.pendingMu.Lock()
+		delete(c.pending, tc.ID)
+		c.pendingMu.Unlock()
+		socks5.SendFailure(conn)
+		c.mux.SendClose(tc.ID)
 		c.mux.RemoveConn(tc.ID)
 	}
 }

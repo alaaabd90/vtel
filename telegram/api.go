@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-const apiBase = "https://api.telegram.org/bot"
+const (
+	apiBase             = "https://api.telegram.org/bot"
+	MaxSendDocumentSize = 50 * 1024 * 1024 // 50MB Telegram sendDocument limit
+)
 
 type API struct {
 	token  string
@@ -71,6 +74,10 @@ type fileResponse struct {
 
 // SendDocument uploads a document to a channel. Returns retry_after on 429.
 func (a *API) SendDocument(channelID int64, filename string, data []byte) (retryAfter int, err error) {
+	if len(data) > MaxSendDocumentSize {
+		return 0, fmt.Errorf("document size %d exceeds Telegram 50MB limit", len(data))
+	}
+
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 
