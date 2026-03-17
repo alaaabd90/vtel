@@ -1,12 +1,12 @@
 package telegram
 
 import (
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 )
-
 
 const (
 	pollerInitialBackoff = 1 * time.Second
@@ -19,7 +19,7 @@ type Poller struct {
 	peerBotID int64
 	channelID int64
 	offset    int
-	recvCh    chan []byte // received file data
+	recvCh    chan []byte
 	done      chan struct{}
 }
 
@@ -37,8 +37,17 @@ func (p *Poller) RecvChan() <-chan []byte {
 	return p.recvCh
 }
 
+// batchItem holds a received batch, either already decoded (text msg) or
+// pending download (document).
+type batchItem struct {
+	sortKey string // "{peerBotID}_{seq:012d}" — used for ordering
+	data    []byte // non-nil for text messages (already decoded)
+	fileID  string // non-empty for documents (needs download)
+}
+
 func (p *Poller) Run() {
 	errorBackoff := pollerInitialBackoff
+	peerPrefix := fmt.Sprintf("%d_", p.peerBotID)
 
 	for {
 		select {
@@ -61,53 +70,59 @@ func (p *Poller) Run() {
 			}
 			continue
 		}
-		errorBackoff = pollerInitialBackoff // reset on success
+		errorBackoff = pollerInitialBackoff
 
-		// Sort updates by batch sequence (filename) for ordering
-		type docUpdate struct {
-			updateID int
-			fileID   string
-			fileName string
-		}
-		var docs []docUpdate
+		var items []batchItem
 
 		for _, u := range updates {
 			if u.UpdateID >= p.offset {
 				p.offset = u.UpdateID + 1
 			}
 			cp := u.ChannelPost
-			if cp == nil {
+			if cp == nil || cp.Chat.ID != p.channelID {
 				continue
 			}
-			if cp.Chat.ID != p.channelID {
+
+			// Text message: "{peerBotID}_{seq:012d}\n{base64data}"
+			if cp.Text != "" && strings.HasPrefix(cp.Text, peerPrefix) {
+				parts := strings.SplitN(cp.Text, "\n", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				decoded, err := base64.StdEncoding.DecodeString(parts[1])
+				if err != nil {
+					fmt.Printf("[poller] base64 decode error: %v\n", err)
+					continue
+				}
+				items = append(items, batchItem{sortKey: parts[0], data: decoded})
 				continue
 			}
-			if cp.Document == nil {
-				continue
+
+			// Document: "{peerBotID}_{seq:012d}.bin.gz"
+			if cp.Document != nil &&
+				strings.HasPrefix(cp.Document.FileName, peerPrefix) &&
+				strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
+				sortKey := strings.TrimSuffix(cp.Document.FileName, ".bin.gz")
+				items = append(items, batchItem{sortKey: sortKey, fileID: cp.Document.FileID})
 			}
-			// Filename format: {peerBotID}_{seq:012d}.bin.gz
-			// Filtering by peer bot ID prefix prevents processing our own messages.
-			peerPrefix := fmt.Sprintf("%d_", p.peerBotID)
-			if !strings.HasPrefix(cp.Document.FileName, peerPrefix) || !strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
-				continue
-			}
-			docs = append(docs, docUpdate{
-				updateID: u.UpdateID,
-				fileID:   cp.Document.FileID,
-				fileName: cp.Document.FileName,
-			})
 		}
 
-		// Sort by filename (fixed-width sequence number ensures correct lexicographic order)
-		sort.Slice(docs, func(i, j int) bool {
-			return docs[i].fileName < docs[j].fileName
+		// Sort by sort key — fixed-width zero-padded seq ensures correct order
+		// across both text and document batches.
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].sortKey < items[j].sortKey
 		})
 
-		for _, d := range docs {
-			data, err := p.api.DownloadFile(d.fileID)
-			if err != nil {
-				fmt.Printf("[poller] download error (%s): %v\n", d.fileName, err)
-				continue
+		for _, item := range items {
+			var data []byte
+			if item.data != nil {
+				data = item.data
+			} else {
+				data, err = p.api.DownloadFile(item.fileID)
+				if err != nil {
+					fmt.Printf("[poller] download error (%s): %v\n", item.sortKey, err)
+					continue
+				}
 			}
 			select {
 			case p.recvCh <- data:

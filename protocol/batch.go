@@ -46,7 +46,7 @@ func (b *Batcher) Add(f *Frame) {
 	data := f.Marshal()
 	b.mu.Lock()
 	b.buf.Write(data)
-	shouldFlush := f.Type == TypeConnect || f.Type == TypeConnectACK || b.buf.Len() >= MaxBatchSize
+	shouldFlush := b.buf.Len() >= MaxBatchSize
 	b.mu.Unlock()
 
 	if shouldFlush {

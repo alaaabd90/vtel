@@ -36,11 +36,12 @@ type Update struct {
 }
 
 type ChannelPost struct {
-	MessageID int       `json:"message_id"`
-	Chat      Chat      `json:"chat"`
-	From      *User     `json:"from"`
-	Document  *Document `json:"document"`
-	SenderChat *Chat    `json:"sender_chat"`
+	MessageID  int       `json:"message_id"`
+	Chat       Chat      `json:"chat"`
+	From       *User     `json:"from"`
+	Text       string    `json:"text"`
+	Document   *Document `json:"document"`
+	SenderChat *Chat     `json:"sender_chat"`
 }
 
 type Chat struct {
@@ -113,6 +114,45 @@ func (a *API) SendDocument(channelID int64, filename string, data []byte) (retry
 		return 0, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
 	}
 
+	if !result.OK {
+		if result.ErrorCode == 429 && result.Parameters != nil {
+			return result.Parameters.RetryAfter, fmt.Errorf("rate limited: %s", result.Description)
+		}
+		return 0, fmt.Errorf("API error %d: %s", result.ErrorCode, result.Description)
+	}
+	return 0, nil
+}
+
+// SendMessage sends a text message to a channel. Returns retry_after on 429.
+func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err error) {
+	payload := struct {
+		ChatID int64  `json:"chat_id"`
+		Text   string `json:"text"`
+	}{ChatID: channelID, Text: text}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+
+	url := apiBase + a.token + "/sendMessage"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result apiResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
 	if !result.OK {
 		if result.ErrorCode == 429 && result.Parameters != nil {
 			return result.Parameters.RetryAfter, fmt.Errorf("rate limited: %s", result.Description)
