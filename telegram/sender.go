@@ -9,7 +9,7 @@ import (
 const (
 	senderMaxRetries     = 3
 	senderInitialBackoff = 2 * time.Second
-	textThreshold        = 1024 // bytes; send as text message below this, document above
+	textThreshold        = 3 * 1024 // 3KB; send as text message below this, document above
 )
 
 // Sender sends batches to Telegram with rate limiting.
@@ -29,7 +29,7 @@ func NewSender(api *API, botID int64, channelID int64) *Sender {
 	}
 }
 
-// Send sends a compressed batch. Small batches (<1KB) go as text messages to
+// Send sends a compressed batch. Small batches (<3.8KB) go as text messages to
 // avoid the document upload overhead; larger ones go as documents.
 func (s *Sender) Send(seq uint64, data []byte) error {
 	if len(data) < textThreshold {
