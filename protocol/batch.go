@@ -11,13 +11,13 @@ import (
 )
 
 const (
-	FlushInterval    = 500 * time.Millisecond
-	MaxBatchSize     = 48 * 1024 * 1024 // 48MB uncompressed
+	FlushIdleTimeout  = 2 * time.Second
+	MaxBatchSize      = 48 * 1024 * 1024 // 48MB uncompressed
 	MaxCompressedSize = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
 
-	maxSendRetries     = 5
+	maxSendRetries      = 5
 	initialRetryBackoff = 1 * time.Second
-	maxRetryBackoff    = 30 * time.Second
+	maxRetryBackoff     = 30 * time.Second
 )
 
 // Batcher collects frames and flushes them as gzip-compressed batches.
@@ -27,21 +27,32 @@ type Batcher struct {
 	seqNum atomic.Uint64
 	sendFn func(seq uint64, data []byte) error
 
-	flushCh chan struct{} // signal immediate flush
-	done    chan struct{}
+	idleTimeout  time.Duration
+	lastQueuedAt atomic.Int64
+	activityCh   chan struct{} // signal queued data so the idle timer can be reset
+	flushCh      chan struct{} // signal immediate flush
+	done         chan struct{}
 }
 
 func NewBatcher(sendFn func(seq uint64, data []byte) error) *Batcher {
+	return newBatcher(sendFn, FlushIdleTimeout)
+}
+
+func newBatcher(sendFn func(seq uint64, data []byte) error, idleTimeout time.Duration) *Batcher {
 	b := &Batcher{
-		sendFn:  sendFn,
-		flushCh: make(chan struct{}, 1),
-		done:    make(chan struct{}),
+		sendFn:      sendFn,
+		idleTimeout: idleTimeout,
+		activityCh:  make(chan struct{}, 1),
+		flushCh:     make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 	go b.flushLoop()
 	return b
 }
 
-// Add adds a frame to the current batch. Triggers immediate flush for CONNECT/CONNECT_ACK.
+// Add adds a frame to the current batch. DATA frames are flushed after a quiet
+// period, while control frames flush immediately so connection setup/teardown
+// does not pick up the batching delay.
 func (b *Batcher) Add(f *Frame) {
 	data := f.Marshal()
 	b.mu.Lock()
@@ -49,9 +60,14 @@ func (b *Batcher) Add(f *Frame) {
 	shouldFlush := b.buf.Len() >= MaxBatchSize
 	b.mu.Unlock()
 
-	if shouldFlush {
+	b.lastQueuedAt.Store(time.Now().UnixNano())
+
+	if shouldFlush || isControlFrame(f.Type) {
 		b.triggerFlush()
+		return
 	}
+
+	b.triggerActivity()
 }
 
 func (b *Batcher) triggerFlush() {
@@ -61,15 +77,65 @@ func (b *Batcher) triggerFlush() {
 	}
 }
 
+func (b *Batcher) triggerActivity() {
+	select {
+	case b.activityCh <- struct{}{}:
+	default:
+	}
+}
+
 func (b *Batcher) flushLoop() {
-	ticker := time.NewTicker(FlushInterval)
-	defer ticker.Stop()
+	var (
+		timer   *time.Timer
+		timerCh <-chan time.Time
+	)
+
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+
+	resetTimer := func() {
+		if !b.hasBufferedData() {
+			stopTimer()
+			timerCh = nil
+			return
+		}
+
+		deadline := time.Unix(0, b.lastQueuedAt.Load()).Add(b.idleTimeout)
+		delay := time.Until(deadline)
+		if delay < 0 {
+			delay = 0
+		}
+
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			stopTimer()
+			timer.Reset(delay)
+		}
+		timerCh = timer.C
+	}
+
+	defer stopTimer()
+
 	for {
 		select {
-		case <-ticker.C:
+		case <-b.activityCh:
+			resetTimer()
+		case <-timerCh:
 			b.Flush()
+			resetTimer()
 		case <-b.flushCh:
 			b.Flush()
+			resetTimer()
 		case <-b.done:
 			b.Flush()
 			return
@@ -90,6 +156,12 @@ func (b *Batcher) Flush() {
 	b.mu.Unlock()
 
 	b.flushRaw(raw)
+}
+
+func (b *Batcher) hasBufferedData() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len() > 0
 }
 
 // flushRaw compresses raw bytes and sends, splitting if compressed size exceeds the limit.
@@ -135,6 +207,10 @@ func (b *Batcher) sendWithRetry(compressed []byte) {
 
 func (b *Batcher) Stop() {
 	close(b.done)
+}
+
+func isControlFrame(frameType byte) bool {
+	return frameType != TypeData
 }
 
 func gzipCompress(data []byte) ([]byte, error) {
