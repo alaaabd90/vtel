@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -193,6 +194,10 @@ func (b *Batcher) sendWithRetry(compressed []byte) {
 		if err == nil {
 			return
 		}
+		if isPermanentError(err) {
+			fmt.Printf("[batcher] DROPPED batch seq=%d due to permanent error: %v\n", seq, err)
+			return
+		}
 		fmt.Printf("[batcher] send error (seq=%d, attempt=%d/%d): %v\n", seq, attempt+1, maxSendRetries+1, err)
 		if attempt < maxSendRetries {
 			time.Sleep(backoff)
@@ -226,6 +231,11 @@ func gzipCompress(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func isPermanentError(err error) bool {
+	var permanent interface{ Permanent() bool }
+	return errors.As(err, &permanent) && permanent.Permanent()
 }
 
 // DecompressBatch decompresses a gzip batch and returns all frames.

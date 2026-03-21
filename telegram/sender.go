@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -9,7 +10,7 @@ import (
 const (
 	senderMaxRetries     = 3
 	senderInitialBackoff = 2 * time.Second
-	textThreshold        = 3 * 1024 // 3KB; send as text message below this, document above
+	maxMessageChars      = 4096
 )
 
 // Sender sends batches to Telegram with rate limiting.
@@ -29,13 +30,13 @@ func NewSender(api *API, botID int64, channelID int64) *Sender {
 	}
 }
 
-// Send sends a compressed batch. Small batches (<3.8KB) go as text messages to
-// avoid the document upload overhead; larger ones go as documents.
+// Send sends a compressed batch. Small batches go as text messages when the
+// fully encoded payload fits Telegram's message length limit; larger ones go as
+// documents to avoid oversized sendMessage requests.
 func (s *Sender) Send(seq uint64, data []byte) error {
-	if len(data) < textThreshold {
+	if fitsTextBatch(s.botID, seq, data) {
+		text := formatTextBatch(s.botID, seq, data)
 		return s.sendRetry(seq, func() (int, error) {
-			// Format: "{botID}_{seq:012d}\n{base64data}"
-			text := fmt.Sprintf("%d_%012d\n%s", s.botID, seq, base64.StdEncoding.EncodeToString(data))
 			return s.api.SendMessage(s.channelID, text)
 		})
 	}
@@ -43,6 +44,16 @@ func (s *Sender) Send(seq uint64, data []byte) error {
 		filename := fmt.Sprintf("%d_%012d.bin.gz", s.botID, seq)
 		return s.api.SendDocument(s.channelID, filename, data)
 	})
+}
+
+func fitsTextBatch(botID int64, seq uint64, data []byte) bool {
+	prefixLen := len(fmt.Sprintf("%d_%012d\n", botID, seq))
+	return prefixLen+base64.StdEncoding.EncodedLen(len(data)) <= maxMessageChars
+}
+
+func formatTextBatch(botID int64, seq uint64, data []byte) string {
+	// Format: "{botID}_{seq:012d}\n{base64data}"
+	return fmt.Sprintf("%d_%012d\n%s", botID, seq, base64.StdEncoding.EncodeToString(data))
 }
 
 // sendRetry runs sendFn with rate limiting, retrying on 429 and transient errors.
@@ -64,6 +75,9 @@ func (s *Sender) sendRetry(seq uint64, sendFn func() (retryAfter int, err error)
 		}
 
 		s.limiter.RecordSend()
+		if isPermanentError(err) {
+			return err
+		}
 		if attempt >= senderMaxRetries {
 			return err
 		}
@@ -71,4 +85,9 @@ func (s *Sender) sendRetry(seq uint64, sendFn func() (retryAfter int, err error)
 		time.Sleep(backoff)
 		backoff *= 2
 	}
+}
+
+func isPermanentError(err error) bool {
+	var permanent interface{ Permanent() bool }
+	return errors.As(err, &permanent) && permanent.Permanent()
 }

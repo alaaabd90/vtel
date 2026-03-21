@@ -49,8 +49,8 @@ type Chat struct {
 }
 
 type User struct {
-	ID    int64  `json:"id"`
-	IsBot bool   `json:"is_bot"`
+	ID    int64 `json:"id"`
+	IsBot bool  `json:"is_bot"`
 }
 
 type Document struct {
@@ -71,6 +71,31 @@ type apiResponse struct {
 
 type fileResponse struct {
 	FilePath string `json:"file_path"`
+}
+
+type apiError struct {
+	Code        int
+	Description string
+	RetryAfter  int
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.Code, e.Description)
+}
+
+func (e *apiError) Permanent() bool {
+	return e.Code >= 400 && e.Code < 500 && e.Code != 429
+}
+
+func newAPIError(result apiResponse) *apiError {
+	err := &apiError{
+		Code:        result.ErrorCode,
+		Description: result.Description,
+	}
+	if result.Parameters != nil {
+		err.RetryAfter = result.Parameters.RetryAfter
+	}
+	return err
 }
 
 // SendDocument uploads a document to a channel. Returns retry_after on 429.
@@ -115,10 +140,8 @@ func (a *API) SendDocument(channelID int64, filename string, data []byte) (retry
 	}
 
 	if !result.OK {
-		if result.ErrorCode == 429 && result.Parameters != nil {
-			return result.Parameters.RetryAfter, fmt.Errorf("rate limited: %s", result.Description)
-		}
-		return 0, fmt.Errorf("API error %d: %s", result.ErrorCode, result.Description)
+		apiErr := newAPIError(result)
+		return apiErr.RetryAfter, apiErr
 	}
 	return 0, nil
 }
@@ -154,10 +177,8 @@ func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err err
 		return 0, fmt.Errorf("decode response: %w", err)
 	}
 	if !result.OK {
-		if result.ErrorCode == 429 && result.Parameters != nil {
-			return result.Parameters.RetryAfter, fmt.Errorf("rate limited: %s", result.Description)
-		}
-		return 0, fmt.Errorf("API error %d: %s", result.ErrorCode, result.Description)
+		apiErr := newAPIError(result)
+		return apiErr.RetryAfter, apiErr
 	}
 	return 0, nil
 }
@@ -179,7 +200,7 @@ func (a *API) GetUpdates(offset int, timeout int) ([]Update, error) {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	if !result.OK {
-		return nil, fmt.Errorf("API error %d: %s", result.ErrorCode, result.Description)
+		return nil, newAPIError(result)
 	}
 
 	var updates []Update
@@ -205,7 +226,7 @@ func (a *API) DownloadFile(fileID string) ([]byte, error) {
 		return nil, err
 	}
 	if !result.OK {
-		return nil, fmt.Errorf("API error %d: %s", result.ErrorCode, result.Description)
+		return nil, newAPIError(result)
 	}
 
 	var fr fileResponse
@@ -239,7 +260,7 @@ func (a *API) GetMe() (*User, error) {
 		return nil, err
 	}
 	if !result.OK {
-		return nil, fmt.Errorf("API error: %s", result.Description)
+		return nil, newAPIError(result)
 	}
 
 	var user User
