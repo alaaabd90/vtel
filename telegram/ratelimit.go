@@ -6,33 +6,56 @@ import (
 )
 
 const (
-	initialInterval = 3 * time.Second
-	minInterval     = 1 * time.Second
+	initialInterval = 1 * time.Second
+	minInterval     = 400 * time.Millisecond
 	maxInterval     = 30 * time.Second
-	decreaseStep    = 100 * time.Millisecond // slow decrease on success
+	decreaseStep    = 50 * time.Millisecond
+	burstCapacity   = 3.0
 )
 
 // RateLimiter implements an adaptive token bucket for Telegram API calls.
 type RateLimiter struct {
-	mu       sync.Mutex
-	interval time.Duration
-	lastSend time.Time
+	mu            sync.Mutex
+	interval      time.Duration
+	minInterval   time.Duration
+	maxInterval   time.Duration
+	decreaseStep  time.Duration
+	burstCapacity float64
+	tokens        float64
+	lastRefill    time.Time
 }
 
 func NewRateLimiter() *RateLimiter {
+	return newRateLimiter(initialInterval, minInterval, maxInterval, decreaseStep, burstCapacity)
+}
+
+func newRateLimiter(initial, min, max, decrease time.Duration, burst float64) *RateLimiter {
 	return &RateLimiter{
-		interval: initialInterval,
+		interval:      initial,
+		minInterval:   min,
+		maxInterval:   max,
+		decreaseStep:  decrease,
+		burstCapacity: burst,
+		tokens:        burst,
+		lastRefill:    time.Now(),
 	}
 }
 
 // Wait blocks until it's safe to send.
 func (rl *RateLimiter) Wait() {
-	rl.mu.Lock()
-	since := time.Since(rl.lastSend)
-	wait := rl.interval - since
-	rl.mu.Unlock()
+	for {
+		rl.mu.Lock()
+		now := time.Now()
+		rl.refill(now)
+		if rl.tokens >= 1 {
+			rl.tokens--
+			rl.mu.Unlock()
+			return
+		}
 
-	if wait > 0 {
+		wait := time.Duration((1 - rl.tokens) * float64(rl.interval))
+		rl.mu.Unlock()
+
 		time.Sleep(wait)
 	}
 }
@@ -41,10 +64,12 @@ func (rl *RateLimiter) Wait() {
 func (rl *RateLimiter) RecordSend() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	rl.lastSend = time.Now()
-	rl.interval -= decreaseStep
-	if rl.interval < minInterval {
-		rl.interval = minInterval
+
+	rl.refill(time.Now())
+
+	rl.interval -= rl.decreaseStep
+	if rl.interval < rl.minInterval {
+		rl.interval = rl.minInterval
 	}
 }
 
@@ -56,10 +81,28 @@ func (rl *RateLimiter) RecordRetryAfter(retryAfter int) {
 
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	// Increase interval by 50%
+
 	rl.interval = rl.interval * 3 / 2
-	if rl.interval > maxInterval {
-		rl.interval = maxInterval
+	if rl.interval > rl.maxInterval {
+		rl.interval = rl.maxInterval
 	}
-	rl.lastSend = time.Now()
+	rl.tokens = 0
+	rl.lastRefill = time.Now()
+}
+
+func (rl *RateLimiter) refill(now time.Time) {
+	if rl.lastRefill.IsZero() {
+		rl.lastRefill = now
+		return
+	}
+	if now.Before(rl.lastRefill) {
+		rl.lastRefill = now
+		return
+	}
+
+	rl.tokens += float64(now.Sub(rl.lastRefill)) / float64(rl.interval)
+	if rl.tokens > rl.burstCapacity {
+		rl.tokens = rl.burstCapacity
+	}
+	rl.lastRefill = now
 }

@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	FlushIdleTimeout  = 2 * time.Second
-	MaxBatchSize      = 48 * 1024 * 1024 // 48MB uncompressed
-	MaxCompressedSize = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
+	FlushIdleTimeout   = 250 * time.Millisecond
+	MaxFlushDelay      = 750 * time.Millisecond
+	DataFlushThreshold = 32 * 1024        // Flush active streams before they accumulate too much latency.
+	MaxBatchSize       = 48 * 1024 * 1024 // 48MB uncompressed
+	MaxCompressedSize  = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
 
 	maxSendRetries      = 5
 	initialRetryBackoff = 1 * time.Second
@@ -28,24 +30,29 @@ type Batcher struct {
 	seqNum atomic.Uint64
 	sendFn func(seq uint64, data []byte) error
 
-	idleTimeout  time.Duration
-	lastQueuedAt atomic.Int64
-	activityCh   chan struct{} // signal queued data so the idle timer can be reset
-	flushCh      chan struct{} // signal immediate flush
-	done         chan struct{}
+	idleTimeout        time.Duration
+	maxFlushDelay      time.Duration
+	dataFlushThreshold int
+	batchStartedAt     time.Time
+	lastQueuedAt       time.Time
+	activityCh         chan struct{} // signal queued data so timers can be updated
+	flushCh            chan struct{} // signal immediate flush
+	done               chan struct{}
 }
 
 func NewBatcher(sendFn func(seq uint64, data []byte) error) *Batcher {
-	return newBatcher(sendFn, FlushIdleTimeout)
+	return newBatcher(sendFn, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
 }
 
-func newBatcher(sendFn func(seq uint64, data []byte) error, idleTimeout time.Duration) *Batcher {
+func newBatcher(sendFn func(seq uint64, data []byte) error, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
 	b := &Batcher{
-		sendFn:      sendFn,
-		idleTimeout: idleTimeout,
-		activityCh:  make(chan struct{}, 1),
-		flushCh:     make(chan struct{}, 1),
-		done:        make(chan struct{}),
+		sendFn:             sendFn,
+		idleTimeout:        idleTimeout,
+		maxFlushDelay:      maxFlushDelay,
+		dataFlushThreshold: dataFlushThreshold,
+		activityCh:         make(chan struct{}, 1),
+		flushCh:            make(chan struct{}, 1),
+		done:               make(chan struct{}),
 	}
 	go b.flushLoop()
 	return b
@@ -56,12 +63,21 @@ func newBatcher(sendFn func(seq uint64, data []byte) error, idleTimeout time.Dur
 // does not pick up the batching delay.
 func (b *Batcher) Add(f *Frame) {
 	data := f.Marshal()
+	now := time.Now()
+
 	b.mu.Lock()
+	if b.buf.Len() == 0 {
+		b.batchStartedAt = now
+	}
+	b.lastQueuedAt = now
 	b.buf.Write(data)
-	shouldFlush := b.buf.Len() >= MaxBatchSize
+	bufLen := b.buf.Len()
 	b.mu.Unlock()
 
-	b.lastQueuedAt.Store(time.Now().UnixNano())
+	shouldFlush := bufLen >= MaxBatchSize
+	if f.Type == TypeData && b.dataFlushThreshold > 0 && bufLen >= b.dataFlushThreshold {
+		shouldFlush = true
+	}
 
 	if shouldFlush || isControlFrame(f.Type) {
 		b.triggerFlush()
@@ -87,56 +103,66 @@ func (b *Batcher) triggerActivity() {
 
 func (b *Batcher) flushLoop() {
 	var (
-		timer   *time.Timer
-		timerCh <-chan time.Time
+		idleTimer *time.Timer
+		idleCh    <-chan time.Time
+		maxTimer  *time.Timer
+		maxCh     <-chan time.Time
 	)
 
-	stopTimer := func() {
-		if timer == nil {
+	stopTimer := func(timer **time.Timer, ch *<-chan time.Time) {
+		if *timer == nil {
 			return
 		}
-		if !timer.Stop() {
+		if !(*timer).Stop() {
 			select {
-			case <-timer.C:
+			case <-(*timer).C:
 			default:
 			}
 		}
+		*ch = nil
 	}
 
-	resetTimer := func() {
-		if !b.hasBufferedData() {
-			stopTimer()
-			timerCh = nil
-			return
-		}
-
-		deadline := time.Unix(0, b.lastQueuedAt.Load()).Add(b.idleTimeout)
-		delay := time.Until(deadline)
+	resetTimer := func(timer **time.Timer, ch *<-chan time.Time, delay time.Duration) {
 		if delay < 0 {
 			delay = 0
 		}
-
-		if timer == nil {
-			timer = time.NewTimer(delay)
+		if *timer == nil {
+			*timer = time.NewTimer(delay)
 		} else {
-			stopTimer()
-			timer.Reset(delay)
+			stopTimer(timer, ch)
+			(*timer).Reset(delay)
 		}
-		timerCh = timer.C
+		*ch = (*timer).C
 	}
 
-	defer stopTimer()
+	updateTimers := func() {
+		hasData, batchStartedAt, lastQueuedAt := b.batchState()
+		if !hasData {
+			stopTimer(&idleTimer, &idleCh)
+			stopTimer(&maxTimer, &maxCh)
+			return
+		}
+
+		resetTimer(&idleTimer, &idleCh, time.Until(lastQueuedAt.Add(b.idleTimeout)))
+		resetTimer(&maxTimer, &maxCh, time.Until(batchStartedAt.Add(b.maxFlushDelay)))
+	}
+
+	defer stopTimer(&idleTimer, &idleCh)
+	defer stopTimer(&maxTimer, &maxCh)
 
 	for {
 		select {
 		case <-b.activityCh:
-			resetTimer()
-		case <-timerCh:
+			updateTimers()
+		case <-idleCh:
 			b.Flush()
-			resetTimer()
+			updateTimers()
+		case <-maxCh:
+			b.Flush()
+			updateTimers()
 		case <-b.flushCh:
 			b.Flush()
-			resetTimer()
+			updateTimers()
 		case <-b.done:
 			b.Flush()
 			return
@@ -154,15 +180,20 @@ func (b *Batcher) Flush() {
 	raw := make([]byte, b.buf.Len())
 	copy(raw, b.buf.Bytes())
 	b.buf.Reset()
+	b.batchStartedAt = time.Time{}
+	b.lastQueuedAt = time.Time{}
 	b.mu.Unlock()
 
 	b.flushRaw(raw)
 }
 
-func (b *Batcher) hasBufferedData() bool {
+func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Len() > 0
+	if b.buf.Len() == 0 {
+		return false, time.Time{}, time.Time{}
+	}
+	return true, b.batchStartedAt, b.lastQueuedAt
 }
 
 // flushRaw compresses raw bytes and sends, splitting if compressed size exceeds the limit.
