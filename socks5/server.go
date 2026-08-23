@@ -33,6 +33,12 @@ type HandleFunc func(conn net.Conn, req *ConnectRequest)
 type Server struct {
 	Addr    string
 	Handler HandleFunc
+
+	// RejectIPv6, if set, immediately rejects IPv6 literal targets instead
+	// of attempting them through the tunnel. Default false: vtel's targets
+	// are ordinary internet hosts, not gdrive's mobile-tethering
+	// IPv6-Happy-Eyeballs context that motivated this in gdrive - opt-in.
+	RejectIPv6 bool
 }
 
 func (s *Server) ListenAndServe() error {
@@ -132,7 +138,24 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	req.Port = binary.BigEndian.Uint16(portBuf[:])
 
+	// Immediate-reject checks ported from gdrive's socksserver.go: an
+	// upfront REP 0x04 (host unreachable) for targets that can never be
+	// reached through this tunnel, avoiding a wasted dial/tunnel round-trip.
+	if isMappedDNSOverTLSProbe(req) ||
+		(s.RejectIPv6 && isIPv6LiteralTarget(req)) ||
+		isMapDNSFakeIP(req) ||
+		isBenchmarkIP(req) {
+		rejectHostUnreachable(conn)
+		return
+	}
+
 	s.Handler(conn, req)
+}
+
+// rejectHostUnreachable sends SOCKS5 REP 0x04 (host unreachable) and closes conn.
+func rejectHostUnreachable(conn net.Conn) {
+	conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	conn.Close()
 }
 
 // SendSuccess sends a SOCKS5 success reply.

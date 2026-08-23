@@ -51,7 +51,7 @@ func main() {
 
 	switch cfg.Mode {
 	case "client":
-		c := tunnel.NewClient(specs, cfg.Listen)
+		c := tunnel.NewClient(specs, cfg.Listen, cfg.RejectIPv6)
 		go func() {
 			<-sigCh
 			fmt.Println("\n[vtel] shutting down...")

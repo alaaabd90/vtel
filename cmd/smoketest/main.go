@@ -342,7 +342,7 @@ func main() {
 	serverSpec := tunnel.LinkSpec{ID: 0, API: serverAPI, BotID: serverMe.ID, PeerBotID: clientMe.ID, ChannelID: fakeChannelID, Key: key, CompressionLevel: level}
 
 	const listenAddr = "127.0.0.1:19191"
-	client := tunnel.NewClient([]tunnel.LinkSpec{clientSpec}, listenAddr)
+	client := tunnel.NewClient([]tunnel.LinkSpec{clientSpec}, listenAddr, false)
 	server := tunnel.NewServer([]tunnel.LinkSpec{serverSpec})
 
 	go server.Run()

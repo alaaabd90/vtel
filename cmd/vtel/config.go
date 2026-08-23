@@ -30,6 +30,10 @@ type Config struct {
 	// or "best" - see protocol.ParseCompressionLevel.
 	CompressionLevel string `json:"compression_level"`
 
+	// RejectIPv6, client mode only: immediately reject IPv6 literal SOCKS
+	// targets instead of attempting them through the tunnel. Default false.
+	RejectIPv6 bool `json:"reject_ipv6"`
+
 	Links []LinkConfig `json:"links"`
 }
 

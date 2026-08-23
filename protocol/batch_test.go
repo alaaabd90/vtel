@@ -160,6 +160,73 @@ func TestUpdateBytesPerSecMeasuresAfterOneSecondWindow(t *testing.T) {
 	}
 }
 
+func TestGetBufPutBufReusesCapacity(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	defer b.Stop()
+
+	buf1 := b.getBuf()
+	orig := *buf1
+	*buf1 = append(*buf1, []byte("hello")...)
+	b.putBuf(buf1)
+
+	buf2 := b.getBuf()
+	if len(*buf2) != 0 {
+		t.Fatalf("reused buffer len = %d, want 0", len(*buf2))
+	}
+	if cap(*buf2) != cap(orig) {
+		t.Fatalf("expected the pooled buffer's capacity to be reused, got cap %d want %d", cap(*buf2), cap(orig))
+	}
+}
+
+func TestPutBufDropsOversizedBuffer(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	defer b.Stop()
+
+	oversized := make([]byte, 0, batchBufCap+1)
+	b.putBuf(&oversized)
+
+	select {
+	case <-b.bufPoolCh:
+		t.Fatal("oversized buffer was pooled instead of dropped")
+	default:
+	}
+}
+
+func TestStopBlocksUntilFinalFlushCompletes(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	sent := make(chan struct{}, 1)
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
+		sent <- struct{}{}
+		return nil
+	}, key, zstdTestLevel(t))
+
+	b.Add(&Frame{Type: TypeConnect, ConnID: 1, Payload: []byte("x")}, true)
+	b.Stop() // must not return until the flush above has actually been sent
+
+	select {
+	case <-sent:
+	default:
+		t.Fatal("Stop() returned before the final flush's send completed")
+	}
+}
+
 func TestAcquireSlotUrgentDoesNotBlockBehindBusySharedSlot(t *testing.T) {
 	t.Parallel()
 

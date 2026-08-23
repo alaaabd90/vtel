@@ -28,6 +28,23 @@ const (
 	// sent on it, then permanently demoted to normal. Control frames
 	// (CONNECT/CONNECT_ACK/CLOSE/RESET) are always urgent regardless.
 	StreamPriorityBytes = 512 * 1024
+
+	// batchBufPoolSlots/batchBufCap bound the pooled plaintext-batch-buffer
+	// cache (see getBuf/putBuf). batchBufCap is deliberately far below
+	// MaxBatchSize: unlike gdrive's single mux (whose pool cap is sized from
+	// the deployment's real chunk_size), vtel has one Batcher per link, and
+	// with a default 20-link pool, slots*cap*linkCount must stay a modest
+	// fraction of total memory. Real flush sizes are realistically tens of
+	// KB to low single-digit MB under vtel's adaptive batching tiers; a
+	// batch that happens to grow past this cap still works fine, it just
+	// isn't pooled afterward.
+	batchBufPoolSlots = 4
+	batchBufCap       = 4 * 1024 * 1024
+
+	// shutdownFlushTimeout bounds how long Stop waits for the final flush's
+	// (possibly still-retrying) send to complete before giving up and
+	// closing the encoder anyway.
+	shutdownFlushTimeout = 10 * time.Second
 )
 
 // CompressionLevel is a zstd encoder level, re-exported so callers outside
@@ -89,6 +106,8 @@ type Batcher struct {
 	activityCh         chan struct{} // signal queued data so timers can be updated
 	flushCh            chan struct{} // signal immediate flush
 	done               chan struct{}
+	stopped            chan struct{} // closed once flushLoop has fully drained after done
+	flushWG            sync.WaitGroup
 
 	// Throughput measurement for adaptiveIdleTimeout, ported from gdrive's
 	// muxLane.updateBytesPerSec/adaptiveCorkDelay: a rolling one-second
@@ -96,6 +115,9 @@ type Batcher struct {
 	bytesPerSec    atomic.Int64
 	bytesSinceMeas atomic.Int64
 	lastMeasureNS  atomic.Int64
+
+	// bufPoolCh caches reusable plaintext batch buffers - see getBuf/putBuf.
+	bufPoolCh chan *[]byte
 }
 
 func NewBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel) *Batcher {
@@ -126,13 +148,48 @@ func newBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []b
 		activityCh:         make(chan struct{}, 1),
 		flushCh:            make(chan struct{}, 1),
 		done:               make(chan struct{}),
+		stopped:            make(chan struct{}),
 		urgentTok:          make(chan struct{}, 1),
 		sharedTok:          make(chan struct{}, 1),
+		bufPoolCh:          make(chan *[]byte, batchBufPoolSlots),
 	}
 	b.urgentTok <- struct{}{}
 	b.sharedTok <- struct{}{}
 	go b.flushLoop()
 	return b
+}
+
+// getBuf/putBuf reuse the plaintext batch buffers that Flush fills before
+// compression, ported from gdrive's getBatchBuf/putBatchBuf
+// (internal/gdrive/mux.go) - avoiding the repeated grow+copy that dominated
+// CPU/allocation profiles there under load. Deliberately a plain buffered
+// channel, not a sync.Pool: sync.Pool drops everything it holds at the
+// start of every GC cycle, so under real load Get() falls through to New()
+// on the majority of calls; a channel isn't subject to that GC-driven
+// eviction, so buffers genuinely get reused.
+func (b *Batcher) getBuf() *[]byte {
+	select {
+	case buf := <-b.bufPoolCh:
+		return buf
+	default:
+		buf := make([]byte, 0, batchBufCap)
+		return &buf
+	}
+}
+
+// putBuf returns buf to the pool, dropping it instead if it grew past
+// batchBufCap (a batch larger than usual) rather than pooling an
+// oversized buffer indefinitely - gdrive's v1.0.65 fix.
+func (b *Batcher) putBuf(buf *[]byte) {
+	if cap(*buf) > batchBufCap {
+		return
+	}
+	*buf = (*buf)[:0]
+	select {
+	case b.bufPoolCh <- buf:
+	default:
+		// Pool full; drop it and let GC reclaim rather than blocking the caller.
+	}
 }
 
 // acquireSlot blocks until a send slot is available for this Batcher's
@@ -263,9 +320,27 @@ func (b *Batcher) flushLoop() {
 			updateTimers()
 		case <-b.done:
 			b.Flush()
+			b.waitFlushesWithTimeout(shutdownFlushTimeout)
 			b.enc.Close()
+			close(b.stopped)
 			return
 		}
+	}
+}
+
+// waitFlushesWithTimeout blocks until every in-flight flushRaw goroutine
+// (tracked via flushWG) has finished, or timeout elapses - whichever comes
+// first. Bounded so a stuck/slow-retrying send can't hang shutdown forever.
+func (b *Batcher) waitFlushesWithTimeout(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		b.flushWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		fmt.Println("[batcher] shutdown: timed out waiting for in-flight flushes")
 	}
 }
 
@@ -283,8 +358,9 @@ func (b *Batcher) Flush() {
 		b.mu.Unlock()
 		return
 	}
-	raw := make([]byte, b.buf.Len())
-	copy(raw, b.buf.Bytes())
+	bufPtr := b.getBuf()
+	*bufPtr = append((*bufPtr)[:0], b.buf.Bytes()...)
+	raw := *bufPtr
 	b.buf.Reset()
 	b.batchStartedAt = time.Time{}
 	b.lastQueuedAt = time.Time{}
@@ -294,7 +370,12 @@ func (b *Batcher) Flush() {
 
 	seq := b.seqNum.Add(1)
 	b.updateBytesPerSec(int64(len(raw)))
-	go b.flushRaw(seq, raw, urgent)
+	b.flushWG.Add(1)
+	go func() {
+		defer b.flushWG.Done()
+		b.flushRaw(seq, raw, urgent)
+		b.putBuf(bufPtr)
+	}()
 }
 
 func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.Time) {
@@ -402,12 +483,16 @@ func (b *Batcher) sendWithRetry(seq uint64, compressed []byte, urgent bool) {
 	fmt.Printf("[batcher] DROPPED batch seq=%d after %d retries\n", seq, maxSendRetries+1)
 }
 
-// Stop flushes any pending batch and stops the flush loop. The encoder is
-// closed once that final flush completes; the decoder is left open since
-// DecompressBatch may still be in flight on the receive side when Stop is
-// called (full shutdown ordering/resource teardown is Stage 7's job).
+// Stop flushes any pending batch, waits (up to shutdownFlushTimeout) for
+// that final flush's send to complete, and closes the encoder - blocking
+// until the flush loop has fully drained rather than merely signaling it to
+// do so, so a caller sequencing Stop after a peer-notification step (see
+// Mux.CloseAllNotify) can rely on those frames having actually been sent
+// once Stop returns. The decoder is left open since DecompressBatch may
+// still be in flight on the receive side when Stop is called.
 func (b *Batcher) Stop() {
 	close(b.done)
+	<-b.stopped
 }
 
 func isControlFrame(frameType byte) bool {

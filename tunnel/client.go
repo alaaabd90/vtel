@@ -27,6 +27,7 @@ type Client struct {
 	links map[int]*linkRuntime
 
 	listenAddr string
+	rejectIPv6 bool
 
 	// pending CONNECT_ACKs, keyed by tunnel conn ID (shared across all
 	// links' muxes; each mux only signals for conn IDs it generated).
@@ -36,9 +37,10 @@ type Client struct {
 	warmupCancel context.CancelFunc
 }
 
-func NewClient(specs []LinkSpec, listenAddr string) *Client {
+func NewClient(specs []LinkSpec, listenAddr string, rejectIPv6 bool) *Client {
 	c := &Client{
 		listenAddr: listenAddr,
+		rejectIPv6: rejectIPv6,
 		pending:    make(map[uint32]chan struct{}),
 	}
 	c.links, c.pool = buildPool(specs, c.newClientLink)
@@ -70,8 +72,9 @@ func (c *Client) Run() error {
 	}
 
 	s := &socks5.Server{
-		Addr:    c.listenAddr,
-		Handler: c.handleSOCKS,
+		Addr:       c.listenAddr,
+		Handler:    c.handleSOCKS,
+		RejectIPv6: c.rejectIPv6,
 	}
 	fmt.Printf("[client] starting SOCKS5 on %s (%d link(s))\n", c.listenAddr, len(c.links))
 	return s.ListenAndServe()
@@ -182,7 +185,8 @@ func (c *Client) Stop() {
 		c.warmupCancel()
 	}
 	for _, lr := range c.links {
-		lr.batcher.Stop()
+		lr.mux.CloseAllNotify()
+		lr.batcher.Stop() // blocks until the resulting TypeClose frames are flushed
 		lr.poller.Stop()
 		lr.mux.Stop()
 	}

@@ -318,6 +318,25 @@ func (m *Mux) Stop() {
 	close(m.done)
 }
 
+// CloseAllNotify sends a graceful TypeClose for every currently open
+// connection on this Mux, notifying the peer before local resources are
+// torn down. Ported from gdrive's graceful-shutdown fix: previously Stop
+// gave the peer zero notice, leaving its side of each stream to rely
+// solely on the 30s DataCh-stall timeout or 5-minute idle GC to notice.
+// Callers should call this before Stop/the owning Batcher's Stop, so the
+// resulting TypeClose frames actually get flushed.
+func (m *Mux) CloseAllNotify() {
+	m.mu.RLock()
+	ids := make([]uint32, 0, len(m.conns))
+	for id := range m.conns {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.SendClose(id)
+	}
+}
+
 // Relay copies data bidirectionally between a net.Conn and a tunnel Conn.
 func (m *Mux) Relay(netConn net.Conn, tunnelConn *Conn) {
 	// net -> tunnel

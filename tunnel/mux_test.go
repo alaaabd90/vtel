@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -152,6 +153,55 @@ func TestControlFramesAreAlwaysUrgent(t *testing.T) {
 	if !urgencies[len(urgencies)-2] || !urgencies[len(urgencies)-1] {
 		t.Fatalf("SendClose/SendReset must always be urgent, got %v", urgencies)
 	}
+}
+
+func TestCloseAllNotifySendsCloseForEveryOpenConn(t *testing.T) {
+	var notified []uint32
+	var mu sync.Mutex
+	m := NewMux(func(f *protocol.Frame, urgent bool) {
+		if f.Type != protocol.TypeClose {
+			return
+		}
+		mu.Lock()
+		notified = append(notified, f.ConnID)
+		mu.Unlock()
+	})
+
+	c1 := m.NewConn()
+	c2 := m.NewConn()
+	c3 := m.NewConn()
+
+	m.CloseAllNotify()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notified) != 3 {
+		t.Fatalf("got %d TypeClose notifications, want 3", len(notified))
+	}
+	seen := map[uint32]bool{}
+	for _, id := range notified {
+		seen[id] = true
+	}
+	for _, id := range []uint32{c1.ID, c2.ID, c3.ID} {
+		if !seen[id] {
+			t.Errorf("conn %08x was not notified by CloseAllNotify", id)
+		}
+	}
+
+	// CloseAllNotify only notifies the peer; it does not itself tear down
+	// local Conn state (that's Mux.Stop's job, called separately).
+	for _, c := range []*Conn{c1, c2, c3} {
+		if c.IsClosed() {
+			t.Errorf("conn %08x was closed locally by CloseAllNotify, want notify-only", c.ID)
+		}
+	}
+}
+
+func TestCloseAllNotifyOnEmptyMuxIsNoop(t *testing.T) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) {
+		t.Fatal("sendFrame should not be called with no open conns")
+	})
+	m.CloseAllNotify()
 }
 
 func TestTypeCloseAndTypeResetBothCloseConn(t *testing.T) {

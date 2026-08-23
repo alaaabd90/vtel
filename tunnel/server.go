@@ -101,7 +101,8 @@ func (s *Server) Stop() {
 		s.warmupCancel()
 	}
 	for _, lr := range s.links {
-		lr.batcher.Stop()
+		lr.mux.CloseAllNotify()
+		lr.batcher.Stop() // blocks until the resulting TypeClose frames are flushed
 		lr.poller.Stop()
 		lr.mux.Stop()
 	}
