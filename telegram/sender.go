@@ -41,7 +41,7 @@ func (s *Sender) Send(seq uint64, data []byte) error {
 		})
 	}
 	return s.sendRetry(seq, func() (int, error) {
-		filename := fmt.Sprintf("%d_%012d.bin.gz", s.botID, seq)
+		filename := fmt.Sprintf("%d_%012d.bin.zst", s.botID, seq)
 		return s.api.SendDocument(s.channelID, filename, data)
 	})
 }

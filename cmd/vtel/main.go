@@ -19,6 +19,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Invalid secret: %v\n", err)
 		os.Exit(1)
 	}
+	level, err := protocol.ParseCompressionLevel(cfg.CompressionLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid compression_level: %v\n", err)
+		os.Exit(1)
+	}
 
 	specs := make([]tunnel.LinkSpec, 0, len(cfg.Links))
 	for i, lc := range cfg.Links {
@@ -30,12 +35,13 @@ func main() {
 		}
 		fmt.Printf("[vtel] link %d: bot ID %d\n", i, me.ID)
 		specs = append(specs, tunnel.LinkSpec{
-			ID:        i,
-			API:       api,
-			BotID:     me.ID,
-			PeerBotID: lc.PeerBotID,
-			ChannelID: lc.ChannelID,
-			Key:       key,
+			ID:               i,
+			API:              api,
+			BotID:            me.ID,
+			PeerBotID:        lc.PeerBotID,
+			ChannelID:        lc.ChannelID,
+			Key:              key,
+			CompressionLevel: level,
 		})
 	}
 	fmt.Printf("[vtel] mode: %s, %d link(s)\n", cfg.Mode, len(specs))

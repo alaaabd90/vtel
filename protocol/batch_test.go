@@ -30,6 +30,10 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
+	level, err := ParseCompressionLevel("")
+	if err != nil {
+		t.Fatalf("ParseCompressionLevel: %v", err)
+	}
 
 	flushedAt := make(chan time.Time, 1)
 	batcher := newBatcher(func(seq uint64, data []byte) error {
@@ -38,7 +42,7 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 		default:
 		}
 		return nil
-	}, key, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
+	}, key, level, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
 	defer batcher.Stop()
 
 	frame := &Frame{
@@ -62,6 +66,59 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 	case <-time.After(600 * time.Millisecond):
 		t.Fatal("batch did not flush on max delay")
 	}
+}
+
+func TestBatcherRoundTripsThroughEnvelopeAndZstd(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+
+	sent := make(chan []byte, 1)
+	batcher := NewBatcher(func(seq uint64, data []byte) error {
+		sent <- data
+		return nil
+	}, key, zstdTestLevel(t))
+	defer batcher.Stop()
+
+	batcher.Add(&Frame{Type: TypeConnect, ConnID: 7, Payload: []byte("connect payload")})
+
+	var sealed []byte
+	select {
+	case sealed = <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch never flushed")
+	}
+
+	compressed, ok, err := OpenEnvelope(key, sealed)
+	if err != nil {
+		t.Fatalf("OpenEnvelope: %v", err)
+	}
+	if !ok {
+		t.Fatal("OpenEnvelope: ok=false for a freshly sealed batch")
+	}
+
+	frames, err := batcher.DecompressBatch(compressed)
+	if err != nil {
+		t.Fatalf("DecompressBatch: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("got %d frames, want 1", len(frames))
+	}
+	if frames[0].ConnID != 7 || string(frames[0].Payload) != "connect payload" {
+		t.Fatalf("frame mismatch: %+v", frames[0])
+	}
+}
+
+func zstdTestLevel(t *testing.T) CompressionLevel {
+	t.Helper()
+	level, err := ParseCompressionLevel("fastest")
+	if err != nil {
+		t.Fatalf("ParseCompressionLevel: %v", err)
+	}
+	return level
 }
 
 type permanentBatchError struct{}

@@ -80,7 +80,7 @@ func (c *Client) recvLoop(lr *linkRuntime) {
 		if !ok {
 			continue // wrong key, tampered, or not a vtel envelope - skip silently
 		}
-		frames, err := protocol.DecompressBatch(compressed)
+		frames, err := lr.batcher.DecompressBatch(compressed)
 		if err != nil {
 			fmt.Printf("[client] link %d decompress error: %v\n", lr.link.ID, err)
 			continue

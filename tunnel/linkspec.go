@@ -9,12 +9,13 @@ import (
 // LinkSpec describes one bot/channel pair to build a runtime link from.
 // ID must be unique within a Client/Server's set of links.
 type LinkSpec struct {
-	ID        int
-	API       *telegram.API
-	BotID     int64
-	PeerBotID int64
-	ChannelID int64
-	Key       []byte // AES-256-GCM key from protocol.DeriveKey, shared across the pool
+	ID               int
+	API              *telegram.API
+	BotID            int64
+	PeerBotID        int64
+	ChannelID        int64
+	Key              []byte                    // AES-256-GCM key from protocol.DeriveKey, shared across the pool
+	CompressionLevel protocol.CompressionLevel // from protocol.ParseCompressionLevel, shared across the pool
 }
 
 // linkRuntime bundles the transport objects for one link. It is looked up by
@@ -44,7 +45,7 @@ func newLinkRuntime(spec LinkSpec) *linkRuntime {
 		poller: telegram.NewPoller(spec.API, spec.PeerBotID, spec.ChannelID),
 		key:    spec.Key,
 	}
-	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key)
+	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key, spec.CompressionLevel)
 	lr.mux = NewMux(func(f *protocol.Frame) {
 		lr.batcher.Add(f)
 	})

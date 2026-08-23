@@ -98,11 +98,11 @@ func (p *Poller) Run() {
 				continue
 			}
 
-			// Document: "{peerBotID}_{seq:012d}.bin.gz"
+			// Document: "{peerBotID}_{seq:012d}.bin.zst"
 			if cp.Document != nil &&
 				strings.HasPrefix(cp.Document.FileName, peerPrefix) &&
-				strings.HasSuffix(cp.Document.FileName, ".bin.gz") {
-				sortKey := strings.TrimSuffix(cp.Document.FileName, ".bin.gz")
+				strings.HasSuffix(cp.Document.FileName, ".bin.zst") {
+				sortKey := strings.TrimSuffix(cp.Document.FileName, ".bin.zst")
 				items = append(items, batchItem{sortKey: sortKey, fileID: cp.Document.FileID})
 			}
 		}

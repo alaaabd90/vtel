@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/alaaabd90/vtel/protocol"
 )
 
 // LinkConfig describes one bot/channel pair used as an independent tunnel
@@ -23,6 +25,10 @@ type Config struct {
 	// Secret derives the AEAD key used to encrypt every batch (added here
 	// for the envelope encryption layer; one shared secret across the pool).
 	Secret string `json:"secret"`
+
+	// CompressionLevel is one of "fastest" (default), "default", "better",
+	// or "best" - see protocol.ParseCompressionLevel.
+	CompressionLevel string `json:"compression_level"`
 
 	Links []LinkConfig `json:"links"`
 }
@@ -60,6 +66,10 @@ func ParseConfig() Config {
 	}
 	if c.Secret == "" {
 		fmt.Fprintln(os.Stderr, "Error: secret is required")
+		os.Exit(1)
+	}
+	if _, err := protocol.ParseCompressionLevel(c.CompressionLevel); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	if c.Mode == "client" && c.Listen == "" {

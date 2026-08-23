@@ -2,13 +2,13 @@ package protocol
 
 import (
 	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -23,7 +23,29 @@ const (
 	maxRetryBackoff     = 30 * time.Second
 )
 
-// Batcher collects frames and flushes them as gzip-compressed, AES-256-GCM
+// CompressionLevel is a zstd encoder level, re-exported so callers outside
+// this package don't need to import klauspost/compress/zstd directly.
+type CompressionLevel = zstd.EncoderLevel
+
+// ParseCompressionLevel maps a config string to a zstd.EncoderLevel.
+// "" and "fastest" match today's gzip.BestSpeed intent - cheap CPU cost per
+// flush over squeezing out extra ratio.
+func ParseCompressionLevel(s string) (CompressionLevel, error) {
+	switch s {
+	case "", "fastest":
+		return zstd.SpeedFastest, nil
+	case "default":
+		return zstd.SpeedDefault, nil
+	case "better":
+		return zstd.SpeedBetterCompression, nil
+	case "best":
+		return zstd.SpeedBestCompression, nil
+	default:
+		return 0, fmt.Errorf("unknown compression level %q (want fastest, default, better, or best)", s)
+	}
+}
+
+// Batcher collects frames and flushes them as zstd-compressed, AES-256-GCM
 // sealed batches.
 type Batcher struct {
 	mu     sync.Mutex
@@ -31,6 +53,12 @@ type Batcher struct {
 	seqNum atomic.Uint64
 	sendFn func(seq uint64, data []byte) error
 	key    []byte // AES-256-GCM key from DeriveKey, applied to every flush
+
+	// enc/dec are constructed once and reused across every flush/receive on
+	// this Batcher - a fresh zstd encoder per flush is a known real
+	// performance trap (each one allocates its own internal tables).
+	enc *zstd.Encoder
+	dec *zstd.Decoder
 
 	idleTimeout        time.Duration
 	maxFlushDelay      time.Duration
@@ -42,14 +70,28 @@ type Batcher struct {
 	done               chan struct{}
 }
 
-func NewBatcher(sendFn func(seq uint64, data []byte) error, key []byte) *Batcher {
-	return newBatcher(sendFn, key, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
+func NewBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level CompressionLevel) *Batcher {
+	return newBatcher(sendFn, key, level, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
 }
 
-func newBatcher(sendFn func(seq uint64, data []byte) error, key []byte, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
+func newBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level CompressionLevel, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
+	if err != nil {
+		// Only reachable with an invalid EncoderLevel constant, which this
+		// package's own ParseCompressionLevel fully controls - a
+		// construction-time misconfiguration, not a runtime condition.
+		panic(fmt.Sprintf("protocol: zstd.NewWriter: %v", err))
+	}
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		panic(fmt.Sprintf("protocol: zstd.NewReader: %v", err))
+	}
+
 	b := &Batcher{
 		sendFn:             sendFn,
 		key:                key,
+		enc:                enc,
+		dec:                dec,
 		idleTimeout:        idleTimeout,
 		maxFlushDelay:      maxFlushDelay,
 		dataFlushThreshold: dataFlushThreshold,
@@ -168,6 +210,7 @@ func (b *Batcher) flushLoop() {
 			updateTimers()
 		case <-b.done:
 			b.Flush()
+			b.enc.Close()
 			return
 		}
 	}
@@ -201,11 +244,7 @@ func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.
 
 // flushRaw compresses raw bytes and sends, splitting if compressed size exceeds the limit.
 func (b *Batcher) flushRaw(raw []byte) {
-	compressed, err := gzipCompress(raw)
-	if err != nil {
-		fmt.Printf("[batcher] compress error: %v\n", err)
-		return
-	}
+	compressed := b.enc.EncodeAll(raw, nil)
 
 	if len(compressed) > MaxCompressedSize {
 		// Split raw in half and send as two batches
@@ -250,6 +289,10 @@ func (b *Batcher) sendWithRetry(compressed []byte) {
 	fmt.Printf("[batcher] DROPPED batch seq=%d after %d retries\n", seq, maxSendRetries+1)
 }
 
+// Stop flushes any pending batch and stops the flush loop. The encoder is
+// closed once that final flush completes; the decoder is left open since
+// DecompressBatch may still be in flight on the receive side when Stop is
+// called (full shutdown ordering/resource teardown is Stage 7's job).
 func (b *Batcher) Stop() {
 	close(b.done)
 }
@@ -258,37 +301,17 @@ func isControlFrame(frameType byte) bool {
 	return frameType != TypeData
 }
 
-func gzipCompress(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(data); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 func isPermanentError(err error) bool {
 	var permanent interface{ Permanent() bool }
 	return errors.As(err, &permanent) && permanent.Permanent()
 }
 
-// DecompressBatch decompresses a gzip batch and returns all frames.
-func DecompressBatch(data []byte) ([]*Frame, error) {
-	r, err := gzip.NewReader(bytes.NewReader(data))
+// DecompressBatch decompresses a zstd batch (using this Batcher's shared
+// decoder) and returns all frames.
+func (b *Batcher) DecompressBatch(data []byte) ([]*Frame, error) {
+	raw, err := b.dec.DecodeAll(data, nil)
 	if err != nil {
-		return nil, fmt.Errorf("gzip open: %w", err)
-	}
-	defer r.Close()
-
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("gzip read: %w", err)
+		return nil, fmt.Errorf("zstd decode: %w", err)
 	}
 
 	var frames []*Frame

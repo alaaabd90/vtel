@@ -317,6 +317,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "DeriveKey: %v\n", err)
 		os.Exit(1)
 	}
+	level, err := protocol.ParseCompressionLevel("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ParseCompressionLevel: %v\n", err)
+		os.Exit(1)
+	}
 
 	clientAPI := telegram.NewAPIWithHost("faketoken-client", fakeServer.URL)
 	serverAPI := telegram.NewAPIWithHost("faketoken-server", fakeServer.URL)
@@ -333,8 +338,8 @@ func main() {
 	}
 	fmt.Printf("[smoketest] client bot ID %d, server bot ID %d\n", clientMe.ID, serverMe.ID)
 
-	clientSpec := tunnel.LinkSpec{ID: 0, API: clientAPI, BotID: clientMe.ID, PeerBotID: serverMe.ID, ChannelID: fakeChannelID, Key: key}
-	serverSpec := tunnel.LinkSpec{ID: 0, API: serverAPI, BotID: serverMe.ID, PeerBotID: clientMe.ID, ChannelID: fakeChannelID, Key: key}
+	clientSpec := tunnel.LinkSpec{ID: 0, API: clientAPI, BotID: clientMe.ID, PeerBotID: serverMe.ID, ChannelID: fakeChannelID, Key: key, CompressionLevel: level}
+	serverSpec := tunnel.LinkSpec{ID: 0, API: serverAPI, BotID: serverMe.ID, PeerBotID: clientMe.ID, ChannelID: fakeChannelID, Key: key, CompressionLevel: level}
 
 	const listenAddr = "127.0.0.1:19191"
 	client := tunnel.NewClient([]tunnel.LinkSpec{clientSpec}, listenAddr)
