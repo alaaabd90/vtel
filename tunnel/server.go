@@ -5,87 +5,79 @@ import (
 	"net"
 	"time"
 
-	"github.com/teltun/teltun/protocol"
-	"github.com/teltun/teltun/telegram"
+	"github.com/alaaabd90/vtel/protocol"
 )
 
-// Server runs the server side: receives tunnel frames, makes outbound TCP connections.
+// Server runs the server side: receives tunnel frames from a pool of links,
+// makes outbound TCP connections.
 type Server struct {
-	mux     *Mux
-	batcher *protocol.Batcher
-	poller  *telegram.Poller
-	sender  *telegram.Sender
-	api     *telegram.API
+	links map[int]*linkRuntime
 }
 
-func NewServer(api *telegram.API, myBotID, peerBotID, channelID int64) *Server {
-	sender := telegram.NewSender(api, myBotID, channelID)
-
-	s := &Server{
-		api:    api,
-		sender: sender,
-	}
-
-	s.batcher = protocol.NewBatcher(sender.Send)
-	s.mux = NewMux(func(f *protocol.Frame) {
-		s.batcher.Add(f)
-	})
-	s.poller = telegram.NewPoller(api, peerBotID, channelID)
-
-	// Handle CONNECT: dial the target and set up relay
-	s.mux.onConnect = func(connID uint32, cp *protocol.ConnectPayload) {
-		go s.handleConnect(connID, cp)
-	}
-
+func NewServer(specs []LinkSpec) *Server {
+	s := &Server{}
+	s.links, _ = buildPool(specs, s.newServerLink)
 	return s
 }
 
-func (s *Server) Run() {
-	go s.poller.Run()
-	go s.recvLoop()
+func (s *Server) newServerLink(spec LinkSpec) *linkRuntime {
+	lr := newLinkRuntime(spec)
+	lr.mux.onConnect = func(connID uint32, cp *protocol.ConnectPayload) {
+		go s.handleConnect(lr, connID, cp)
+	}
+	return lr
+}
 
-	fmt.Println("[server] running, waiting for tunnel connections...")
+func (s *Server) Run() {
+	for _, lr := range s.links {
+		go lr.poller.Run()
+		go s.recvLoop(lr)
+	}
+
+	fmt.Printf("[server] running with %d link(s), waiting for tunnel connections...\n", len(s.links))
 	select {} // block forever
 }
 
-func (s *Server) recvLoop() {
-	for data := range s.poller.RecvChan() {
+func (s *Server) recvLoop(lr *linkRuntime) {
+	for data := range lr.poller.RecvChan() {
 		frames, err := protocol.DecompressBatch(data)
 		if err != nil {
-			fmt.Printf("[server] decompress error: %v\n", err)
+			fmt.Printf("[server] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
 		}
 		for _, f := range frames {
-			s.mux.HandleFrame(f)
+			lr.mux.HandleFrame(f)
 		}
 	}
 }
 
-func (s *Server) handleConnect(connID uint32, cp *protocol.ConnectPayload) {
+func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.ConnectPayload) {
 	target := cp.String()
-	fmt.Printf("[server] CONNECT %08x -> %s\n", connID, target)
+	fmt.Printf("[server] link %d CONNECT %08x -> %s\n", lr.link.ID, connID, target)
 
 	// Dial the target
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
-		fmt.Printf("[server] dial failed %08x -> %s: %v\n", connID, target, err)
-		s.mux.SendClose(connID)
+		fmt.Printf("[server] link %d dial failed %08x -> %s: %v\n", lr.link.ID, connID, target, err)
+		lr.mux.SendClose(connID)
 		return
 	}
 
 	// Register connection and send ACK
-	tc := s.mux.RegisterConn(connID)
-	s.batcher.Add(&protocol.Frame{
+	tc := lr.mux.RegisterConn(connID)
+	lr.batcher.Add(&protocol.Frame{
 		Type:   protocol.TypeConnectACK,
 		ConnID: connID,
 	})
 
 	// Relay traffic
-	s.mux.Relay(conn, tc)
+	lr.mux.Relay(conn, tc)
 }
 
 func (s *Server) Stop() {
-	s.batcher.Stop()
-	s.poller.Stop()
-	s.mux.Stop()
+	for _, lr := range s.links {
+		lr.batcher.Stop()
+		lr.poller.Stop()
+		lr.mux.Stop()
+	}
 }

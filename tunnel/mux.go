@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/teltun/teltun/protocol"
+	"github.com/alaaabd90/vtel/protocol"
 )
 
 // Conn represents a multiplexed connection.

@@ -6,44 +6,45 @@ import (
 	"sync"
 	"time"
 
-	"github.com/teltun/teltun/protocol"
-	"github.com/teltun/teltun/socks5"
-	"github.com/teltun/teltun/telegram"
+	"github.com/alaaabd90/vtel/pool"
+	"github.com/alaaabd90/vtel/protocol"
+	"github.com/alaaabd90/vtel/socks5"
 )
 
-// Client runs the client side: SOCKS5 server + tunnel to Telegram.
+// connectAttemptTimeout is the per-link deadline for a CONNECT_ACK. Shorter
+// than teltun's original single-shot 30s so a stalled/unhealthy link can be
+// retried on another one within a reasonable total time.
+const connectAttemptTimeout = 5 * time.Second
+
+// maxConnectAttempts bounds how many links a single SOCKS CONNECT will try
+// before giving up.
+const maxConnectAttempts = 3
+
+// Client runs the client side: SOCKS5 server + a pool of tunnel links to Telegram.
 type Client struct {
-	mux     *Mux
-	batcher *protocol.Batcher
-	poller  *telegram.Poller
-	sender  *telegram.Sender
-	api     *telegram.API
+	pool  *pool.Pool
+	links map[int]*linkRuntime
 
 	listenAddr string
 
-	// pending CONNECT_ACKs
+	// pending CONNECT_ACKs, keyed by tunnel conn ID (shared across all
+	// links' muxes; each mux only signals for conn IDs it generated).
 	pendingMu sync.Mutex
 	pending   map[uint32]chan struct{}
 }
 
-func NewClient(api *telegram.API, myBotID, peerBotID, channelID int64, listenAddr string) *Client {
-	sender := telegram.NewSender(api, myBotID, channelID)
-
+func NewClient(specs []LinkSpec, listenAddr string) *Client {
 	c := &Client{
-		api:        api,
-		sender:     sender,
 		listenAddr: listenAddr,
 		pending:    make(map[uint32]chan struct{}),
 	}
+	c.links, c.pool = buildPool(specs, c.newClientLink)
+	return c
+}
 
-	c.batcher = protocol.NewBatcher(sender.Send)
-	c.mux = NewMux(func(f *protocol.Frame) {
-		c.batcher.Add(f)
-	})
-	c.poller = telegram.NewPoller(api, peerBotID, channelID)
-
-	// Handle CONNECT_ACK: signal the waiting goroutine
-	c.mux.onConnectACK = func(connID uint32) {
+func (c *Client) newClientLink(spec LinkSpec) *linkRuntime {
+	lr := newLinkRuntime(spec)
+	lr.mux.onConnectACK = func(connID uint32) {
 		c.pendingMu.Lock()
 		ch, ok := c.pending[connID]
 		if ok {
@@ -52,89 +53,119 @@ func NewClient(api *telegram.API, myBotID, peerBotID, channelID int64, listenAdd
 		}
 		c.pendingMu.Unlock()
 	}
-
-	return c
+	return lr
 }
 
 func (c *Client) Run() error {
-	// Start receiving batches from Telegram
-	go c.poller.Run()
-	go c.recvLoop()
+	for _, lr := range c.links {
+		go lr.poller.Run()
+		go c.recvLoop(lr)
+	}
 
-	// Start SOCKS5 server
 	s := &socks5.Server{
 		Addr:    c.listenAddr,
 		Handler: c.handleSOCKS,
 	}
-	fmt.Printf("[client] starting SOCKS5 on %s\n", c.listenAddr)
+	fmt.Printf("[client] starting SOCKS5 on %s (%d link(s))\n", c.listenAddr, len(c.links))
 	return s.ListenAndServe()
 }
 
-func (c *Client) recvLoop() {
-	for data := range c.poller.RecvChan() {
+func (c *Client) recvLoop(lr *linkRuntime) {
+	for data := range lr.poller.RecvChan() {
 		frames, err := protocol.DecompressBatch(data)
 		if err != nil {
-			fmt.Printf("[client] decompress error: %v\n", err)
+			fmt.Printf("[client] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
 		}
 		for _, f := range frames {
-			c.mux.HandleFrame(f)
+			lr.mux.HandleFrame(f)
 		}
 	}
 }
 
 func (c *Client) handleSOCKS(conn net.Conn, req *socks5.ConnectRequest) {
-	// Create a tunnel connection
-	tc := c.mux.NewConn()
+	excluded := make(map[int]bool)
+	for attempt := 1; attempt <= maxConnectAttempts; attempt++ {
+		link := c.pool.PickLeastConnExcluding(excluded)
+		if link == nil {
+			break
+		}
+		lr := c.links[link.ID]
+		if c.tryConnect(conn, req, lr) {
+			return
+		}
+		excluded[link.ID] = true
+	}
+	socks5.SendFailure(conn)
+	conn.Close()
+}
 
-	// Register pending ACK
+// tryConnect attempts a CONNECT over one link. It returns true once the SOCKS
+// connection has been terminally handled (success-and-relayed, or a local
+// failure not worth retrying on another link); false means the caller should
+// retry on a different link.
+func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkRuntime) bool {
+	lr.link.AcquireStream()
+	tc := lr.mux.NewConn()
+
 	ackCh := make(chan struct{})
 	c.pendingMu.Lock()
 	c.pending[tc.ID] = ackCh
 	c.pendingMu.Unlock()
 
-	// Send CONNECT frame
 	cp := &protocol.ConnectPayload{
 		AddrType: req.AddrType,
 		Addr:     req.Addr,
 		Port:     req.Port,
 	}
-	c.batcher.Add(&protocol.Frame{
+	lr.batcher.Add(&protocol.Frame{
 		Type:    protocol.TypeConnect,
 		ConnID:  tc.ID,
 		Payload: cp.Marshal(),
 	})
 
-	fmt.Printf("[client] CONNECT %08x -> %s\n", tc.ID, req.String())
+	fmt.Printf("[client] link %d CONNECT %08x -> %s\n", lr.link.ID, tc.ID, req.String())
 
-	// Wait for ACK (30s timeout)
 	select {
 	case <-ackCh:
-		// Success - send SOCKS5 success and start relay
+		lr.link.RecordSuccess()
 		if err := socks5.SendSuccess(conn); err != nil {
-			c.mux.SendClose(tc.ID)
-			c.mux.RemoveConn(tc.ID)
+			lr.mux.SendClose(tc.ID)
+			lr.mux.RemoveConn(tc.ID)
+			lr.link.ReleaseStream()
 			conn.Close()
-			return
+			return true
 		}
-		c.mux.Relay(conn, tc)
+		lr.mux.Relay(conn, tc)
+		lr.link.ReleaseStream()
+		return true
 	case <-tc.CloseCh:
-		// Connection was rejected by server
-		socks5.SendFailure(conn)
-		c.mux.RemoveConn(tc.ID)
-	case <-time.After(30 * time.Second):
-		fmt.Printf("[client] CONNECT_ACK timeout for %08x\n", tc.ID)
+		// Connection was rejected by the server on this link; worth
+		// retrying on another one.
+		lr.link.RecordFailure()
 		c.pendingMu.Lock()
 		delete(c.pending, tc.ID)
 		c.pendingMu.Unlock()
-		socks5.SendFailure(conn)
-		c.mux.SendClose(tc.ID)
-		c.mux.RemoveConn(tc.ID)
+		lr.mux.RemoveConn(tc.ID)
+		lr.link.ReleaseStream()
+		return false
+	case <-time.After(connectAttemptTimeout):
+		fmt.Printf("[client] link %d CONNECT_ACK timeout for %08x\n", lr.link.ID, tc.ID)
+		lr.link.RecordStall()
+		c.pendingMu.Lock()
+		delete(c.pending, tc.ID)
+		c.pendingMu.Unlock()
+		lr.mux.SendClose(tc.ID)
+		lr.mux.RemoveConn(tc.ID)
+		lr.link.ReleaseStream()
+		return false
 	}
 }
 
 func (c *Client) Stop() {
-	c.batcher.Stop()
-	c.poller.Stop()
-	c.mux.Stop()
+	for _, lr := range c.links {
+		lr.batcher.Stop()
+		lr.poller.Stop()
+		lr.mux.Stop()
+	}
 }

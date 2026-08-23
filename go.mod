@@ -1,3 +1,3 @@
-module github.com/teltun/teltun
+module github.com/alaaabd90/vtel
 
 go 1.21
