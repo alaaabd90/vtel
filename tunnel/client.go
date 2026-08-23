@@ -191,3 +191,14 @@ func (c *Client) Stop() {
 		lr.mux.Stop()
 	}
 }
+
+// Retry429Counts returns, per link ID, how many times that link's Sender
+// has been rate-limited since construction - used by cmd/vtel-bench's
+// 429-frequency-per-bot metric.
+func (c *Client) Retry429Counts() map[int]int64 {
+	counts := make(map[int]int64, len(c.links))
+	for id, lr := range c.links {
+		counts[id] = lr.sender.Retry429Count()
+	}
+	return counts
+}

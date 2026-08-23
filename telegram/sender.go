@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,6 +38,8 @@ type Sender struct {
 	botID     int64
 	channelID int64
 	limiter   *RateLimiter
+
+	retry429Count atomic.Int64 // for cmd/vtel-bench's 429-frequency-per-bot metric
 }
 
 func NewSender(api *API, botID int64, channelID int64) *Sender {
@@ -90,6 +93,7 @@ func (s *Sender) sendRetry(seq uint64, sendFn func() (retryAfter int, err error)
 		}
 
 		if retryAfter > 0 {
+			s.retry429Count.Add(1)
 			fmt.Printf("[sender] rate limited, retry after %ds\n", retryAfter)
 			s.limiter.RecordRetryAfter(retryAfter)
 			continue
@@ -106,6 +110,12 @@ func (s *Sender) sendRetry(seq uint64, sendFn func() (retryAfter int, err error)
 		time.Sleep(backoff)
 		backoff *= 2
 	}
+}
+
+// Retry429Count returns how many times this Sender has been rate-limited
+// (HTTP 429 / retry_after) since construction.
+func (s *Sender) Retry429Count() int64 {
+	return s.retry429Count.Load()
 }
 
 func isPermanentError(err error) bool {
