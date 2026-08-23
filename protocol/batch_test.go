@@ -42,7 +42,7 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 		default:
 		}
 		return nil
-	}, key, level, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
+	}, key, level, nil, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
 	defer batcher.Stop()
 
 	frame := &Frame{
@@ -80,7 +80,7 @@ func TestBatcherRoundTripsThroughEnvelopeAndZstd(t *testing.T) {
 	batcher := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
 		sent <- data
 		return nil
-	}, key, zstdTestLevel(t))
+	}, key, zstdTestLevel(t), nil)
 	defer batcher.Stop()
 
 	batcher.Add(&Frame{Type: TypeConnect, ConnID: 7, Payload: []byte("connect payload")}, true)
@@ -167,7 +167,7 @@ func TestGetBufPutBufReusesCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
-	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
 	defer b.Stop()
 
 	buf1 := b.getBuf()
@@ -191,7 +191,7 @@ func TestPutBufDropsOversizedBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
-	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
 	defer b.Stop()
 
 	oversized := make([]byte, 0, batchBufCap+1)
@@ -215,7 +215,7 @@ func TestStopBlocksUntilFinalFlushCompletes(t *testing.T) {
 	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
 		sent <- struct{}{}
 		return nil
-	}, key, zstdTestLevel(t))
+	}, key, zstdTestLevel(t), nil)
 
 	b.Add(&Frame{Type: TypeConnect, ConnID: 1, Payload: []byte("x")}, true)
 	b.Stop() // must not return until the flush above has actually been sent
@@ -234,7 +234,7 @@ func TestAcquireSlotUrgentDoesNotBlockBehindBusySharedSlot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
-	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
 	defer b.Stop()
 
 	releaseShared := b.acquireSlot(false) // occupy the shared slot, never released in this test
@@ -261,7 +261,7 @@ func TestAcquireSlotNormalBlocksUntilSharedSlotFrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
-	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
 	defer b.Stop()
 
 	releaseShared := b.acquireSlot(false)
@@ -295,7 +295,7 @@ func TestAcquireSlotUrgentFallsBackToSharedWhenReservedBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}
-	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
 	defer b.Stop()
 
 	releaseUrgent := b.acquireSlot(true) // occupy the reserved slot

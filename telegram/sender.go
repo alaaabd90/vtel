@@ -13,6 +13,24 @@ const (
 	maxMessageChars      = 4096
 )
 
+// filenameBases rotates document filenames among generic-but-plausible base
+// names (Stage 8's "look normal" traffic shaping). Deliberately NOT faked
+// as real media (e.g. "IMG_1234.jpg" naming a zstd blob): a fake media
+// extension on non-media content is itself a worse fingerprint than an
+// honest generic name, since the content/extension mismatch is an easy
+// signal. Keeps the honest .bin.zst extension; only the base name rotates.
+var filenameBases = []string{"backup", "export", "archive"}
+
+// rotatingFilename picks a base name deterministically from seq (so
+// retries of the same seq reuse the same filename) while still preserving
+// poller.go's parsing contract: the fixed-width zero-padded seq field
+// always resolves a sort-key comparison before any trailing content, so
+// appending "_{base}" after it doesn't affect ordering.
+func rotatingFilename(botID int64, seq uint64) string {
+	base := filenameBases[seq%uint64(len(filenameBases))]
+	return fmt.Sprintf("%d_%012d_%s.bin.zst", botID, seq, base)
+}
+
 // Sender sends batches to Telegram with rate limiting.
 type Sender struct {
 	api       *API
@@ -45,8 +63,7 @@ func (s *Sender) Send(seq uint64, data []byte, urgent bool) error {
 		})
 	}
 	return s.sendRetry(seq, func() (int, error) {
-		filename := fmt.Sprintf("%d_%012d.bin.zst", s.botID, seq)
-		return s.api.SendDocument(s.channelID, filename, data)
+		return s.api.SendDocument(s.channelID, rotatingFilename(s.botID, seq), data)
 	})
 }
 

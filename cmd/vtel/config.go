@@ -34,6 +34,10 @@ type Config struct {
 	// targets instead of attempting them through the tunnel. Default false.
 	RejectIPv6 bool `json:"reject_ipv6"`
 
+	// QuietHours, if set, widens the adaptive idle timeout during a daily
+	// window instead of pausing sends - see protocol.QuietHoursConfig.
+	QuietHours *protocol.QuietHoursConfig `json:"quiet_hours"`
+
 	Links []LinkConfig `json:"links"`
 }
 
@@ -75,6 +79,12 @@ func ParseConfig() Config {
 	if _, err := protocol.ParseCompressionLevel(c.CompressionLevel); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if c.QuietHours != nil {
+		if c.QuietHours.StartHour < 0 || c.QuietHours.StartHour > 23 || c.QuietHours.EndHour < 0 || c.QuietHours.EndHour > 23 {
+			fmt.Fprintln(os.Stderr, "Error: quiet_hours.start_hour/end_hour must be 0-23")
+			os.Exit(1)
+		}
 	}
 	if c.Mode == "client" && c.Listen == "" {
 		c.Listen = "127.0.0.1:1080"

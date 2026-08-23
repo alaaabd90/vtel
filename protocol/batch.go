@@ -103,11 +103,17 @@ type Batcher struct {
 	dataFlushThreshold int
 	batchStartedAt     time.Time
 	lastQueuedAt       time.Time
-	activityCh         chan struct{} // signal queued data so timers can be updated
-	flushCh            chan struct{} // signal immediate flush
-	done               chan struct{}
-	stopped            chan struct{} // closed once flushLoop has fully drained after done
-	flushWG            sync.WaitGroup
+	// jitteredMaxFlushDelay is rolled once per batch (at batch start,
+	// alongside batchStartedAt) rather than recomputed on every timer
+	// update, so the hard-cap deadline stays a fixed target for a given
+	// batch instead of flapping around on every new frame's Add call.
+	jitteredMaxFlushDelay time.Duration
+	quietHours            *QuietHoursConfig
+	activityCh            chan struct{} // signal queued data so timers can be updated
+	flushCh               chan struct{} // signal immediate flush
+	done                  chan struct{}
+	stopped               chan struct{} // closed once flushLoop has fully drained after done
+	flushWG               sync.WaitGroup
 
 	// Throughput measurement for adaptiveIdleTimeout, ported from gdrive's
 	// muxLane.updateBytesPerSec/adaptiveCorkDelay: a rolling one-second
@@ -120,11 +126,11 @@ type Batcher struct {
 	bufPoolCh chan *[]byte
 }
 
-func NewBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel) *Batcher {
-	return newBatcher(sendFn, key, level, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
+func NewBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel, quietHours *QuietHoursConfig) *Batcher {
+	return newBatcher(sendFn, key, level, quietHours, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
 }
 
-func newBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
+func newBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel, quietHours *QuietHoursConfig, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
 	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
 	if err != nil {
 		// Only reachable with an invalid EncoderLevel constant, which this
@@ -144,6 +150,7 @@ func newBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []b
 		dec:                dec,
 		idleTimeout:        idleTimeout,
 		maxFlushDelay:      maxFlushDelay,
+		quietHours:         quietHours,
 		dataFlushThreshold: dataFlushThreshold,
 		activityCh:         make(chan struct{}, 1),
 		flushCh:            make(chan struct{}, 1),
@@ -220,6 +227,10 @@ func (b *Batcher) Add(f *Frame, urgent bool) {
 	b.mu.Lock()
 	if b.buf.Len() == 0 {
 		b.batchStartedAt = now
+		// Rolled once per batch, not recomputed on every timer update, so
+		// the hard-cap deadline is a fixed target for this batch instead of
+		// flapping around on every new frame's Add call.
+		b.jitteredMaxFlushDelay = jitter(b.maxFlushDelay)
 	}
 	b.lastQueuedAt = now
 	b.buf.Write(data)
@@ -291,15 +302,15 @@ func (b *Batcher) flushLoop() {
 	}
 
 	updateTimers := func() {
-		hasData, batchStartedAt, lastQueuedAt := b.batchState()
+		hasData, batchStartedAt, lastQueuedAt, maxDelay := b.batchState()
 		if !hasData {
 			stopTimer(&idleTimer, &idleCh)
 			stopTimer(&maxTimer, &maxCh)
 			return
 		}
 
-		resetTimer(&idleTimer, &idleCh, time.Until(lastQueuedAt.Add(b.adaptiveIdleTimeout())))
-		resetTimer(&maxTimer, &maxCh, time.Until(batchStartedAt.Add(b.maxFlushDelay)))
+		resetTimer(&idleTimer, &idleCh, time.Until(lastQueuedAt.Add(jitter(b.adaptiveIdleTimeout()))))
+		resetTimer(&maxTimer, &maxCh, time.Until(batchStartedAt.Add(maxDelay)))
 	}
 
 	defer stopTimer(&idleTimer, &idleCh)
@@ -378,13 +389,13 @@ func (b *Batcher) Flush() {
 	}()
 }
 
-func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.Time) {
+func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.Time, jitteredMaxFlushDelay time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.buf.Len() == 0 {
-		return false, time.Time{}, time.Time{}
+		return false, time.Time{}, time.Time{}, 0
 	}
-	return true, b.batchStartedAt, b.lastQueuedAt
+	return true, b.batchStartedAt, b.lastQueuedAt, b.jitteredMaxFlushDelay
 }
 
 // adaptiveIdleTimeout ports gdrive's muxLane.adaptiveCorkDelay tiers
@@ -395,8 +406,18 @@ func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.
 // Telegram flush is a real API call gated by RateLimiter's ~400ms-1s
 // interval - flushing that often while idle would just queue tiny calls
 // behind the limiter for no gain. maxFlushDelay and dataFlushThreshold are
-// NOT made adaptive; only the idle timeout is.
+// NOT made adaptive; only the idle timeout is. During a configured quiet
+// hours window (Stage 8), the result is further multiplied by
+// QuietHoursMultiplier rather than pausing sends entirely.
 func (b *Batcher) adaptiveIdleTimeout() time.Duration {
+	base := b.baseAdaptiveIdleTimeout()
+	if b.quietHours.Active(time.Now()) {
+		return time.Duration(float64(base) * QuietHoursMultiplier)
+	}
+	return base
+}
+
+func (b *Batcher) baseAdaptiveIdleTimeout() time.Duration {
 	switch bps := b.bytesPerSec.Load(); {
 	case bps > 10*1024*1024:
 		return 5 * time.Millisecond

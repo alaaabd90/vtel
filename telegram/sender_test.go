@@ -78,6 +78,34 @@ func TestSenderFallsBackToDocumentWhenEncodedTextIsTooLong(t *testing.T) {
 	}
 }
 
+func TestRotatingFilenamePreservesPrefixAndSortableSeq(t *testing.T) {
+	t.Parallel()
+
+	for _, seq := range []uint64{0, 1, 5, 999999999999} {
+		name := rotatingFilename(1234567890, seq)
+		wantPrefix := "1234567890_"
+		if !strings.HasPrefix(name, wantPrefix) {
+			t.Fatalf("rotatingFilename(seq=%d) = %q, missing prefix %q", seq, name, wantPrefix)
+		}
+		if !strings.HasSuffix(name, ".bin.zst") {
+			t.Fatalf("rotatingFilename(seq=%d) = %q, missing .bin.zst suffix", seq, name)
+		}
+	}
+}
+
+func TestRotatingFilenameSortsCorrectlyBySeq(t *testing.T) {
+	t.Parallel()
+
+	// Different rotating base names must not break ordering by the
+	// fixed-width zero-padded seq field that precedes them, since
+	// poller.go's sortKey comparison depends on this.
+	a := strings.TrimSuffix(rotatingFilename(1, 5), ".bin.zst")
+	b := strings.TrimSuffix(rotatingFilename(1, 6), ".bin.zst")
+	if !(a < b) {
+		t.Fatalf("sortKey for seq=5 (%q) should sort before seq=6 (%q)", a, b)
+	}
+}
+
 func TestSendRetryDoesNotRetryPermanentErrors(t *testing.T) {
 	t.Parallel()
 

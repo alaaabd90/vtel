@@ -42,6 +42,7 @@ func main() {
 			ChannelID:        lc.ChannelID,
 			Key:              key,
 			CompressionLevel: level,
+			QuietHours:       cfg.QuietHours,
 		})
 	}
 	fmt.Printf("[vtel] mode: %s, %d link(s)\n", cfg.Mode, len(specs))

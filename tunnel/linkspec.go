@@ -14,8 +14,9 @@ type LinkSpec struct {
 	BotID            int64
 	PeerBotID        int64
 	ChannelID        int64
-	Key              []byte                    // AES-256-GCM key from protocol.DeriveKey, shared across the pool
-	CompressionLevel protocol.CompressionLevel // from protocol.ParseCompressionLevel, shared across the pool
+	Key              []byte                     // AES-256-GCM key from protocol.DeriveKey, shared across the pool
+	CompressionLevel protocol.CompressionLevel  // from protocol.ParseCompressionLevel, shared across the pool
+	QuietHours       *protocol.QuietHoursConfig // optional, shared across the pool
 }
 
 // linkRuntime bundles the transport objects for one link. It is looked up by
@@ -46,7 +47,7 @@ func newLinkRuntime(spec LinkSpec) *linkRuntime {
 		poller: telegram.NewPoller(spec.API, spec.PeerBotID, spec.ChannelID),
 		key:    spec.Key,
 	}
-	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key, spec.CompressionLevel)
+	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key, spec.CompressionLevel, spec.QuietHours)
 	lr.mux = NewMux(func(f *protocol.Frame, urgent bool) {
 		lr.batcher.Add(f, urgent)
 	})

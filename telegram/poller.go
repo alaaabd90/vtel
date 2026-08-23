@@ -98,7 +98,10 @@ func (p *Poller) Run() {
 				continue
 			}
 
-			// Document: "{peerBotID}_{seq:012d}.bin.zst"
+			// Document: "{peerBotID}_{seq:012d}_{rotatingBase}.bin.zst" (see
+			// sender.go's rotatingFilename). The trailing "_{base}" doesn't
+			// affect sort ordering: the fixed-width zero-padded seq field
+			// always resolves a sortKey comparison before reaching it.
 			if cp.Document != nil &&
 				strings.HasPrefix(cp.Document.FileName, peerPrefix) &&
 				strings.HasSuffix(cp.Document.FileName, ".bin.zst") {
