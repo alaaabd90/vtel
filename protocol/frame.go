@@ -16,6 +16,7 @@ const (
 	TypeData       = 0x03
 	TypeClose      = 0x04
 	TypeKeepalive  = 0x05
+	TypeReset      = 0x06 // hard-abort, distinct from the graceful TypeClose; see Mux.SendReset
 )
 
 // Frame represents a single protocol frame.

@@ -58,6 +58,10 @@ func ParseConfig() Config {
 		fmt.Fprintln(os.Stderr, "Error: at least one link is required")
 		os.Exit(1)
 	}
+	if c.Secret == "" {
+		fmt.Fprintln(os.Stderr, "Error: secret is required")
+		os.Exit(1)
+	}
 	if c.Mode == "client" && c.Listen == "" {
 		c.Listen = "127.0.0.1:1080"
 	}

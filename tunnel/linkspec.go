@@ -14,6 +14,7 @@ type LinkSpec struct {
 	BotID     int64
 	PeerBotID int64
 	ChannelID int64
+	Key       []byte // AES-256-GCM key from protocol.DeriveKey, shared across the pool
 }
 
 // linkRuntime bundles the transport objects for one link. It is looked up by
@@ -26,6 +27,7 @@ type linkRuntime struct {
 	poller  *telegram.Poller
 	mux     *Mux
 	batcher *protocol.Batcher
+	key     []byte
 }
 
 func newLinkRuntime(spec LinkSpec) *linkRuntime {
@@ -40,8 +42,9 @@ func newLinkRuntime(spec LinkSpec) *linkRuntime {
 		api:    spec.API,
 		sender: sender,
 		poller: telegram.NewPoller(spec.API, spec.PeerBotID, spec.ChannelID),
+		key:    spec.Key,
 	}
-	lr.batcher = protocol.NewBatcher(sender.Send)
+	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key)
 	lr.mux = NewMux(func(f *protocol.Frame) {
 		lr.batcher.Add(f)
 	})

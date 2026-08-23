@@ -12,22 +12,35 @@ import (
 )
 
 const (
-	apiBase             = "https://api.telegram.org/bot"
+	defaultHostBase     = "https://api.telegram.org"
 	MaxSendDocumentSize = 50 * 1024 * 1024 // 50MB Telegram sendDocument limit
 )
 
 type API struct {
-	token  string
-	client *http.Client
+	token    string
+	hostBase string // scheme+host only, e.g. "https://api.telegram.org"; overridable for tests
+	client   *http.Client
 }
 
 func NewAPI(token string) *API {
+	return NewAPIWithHost(token, defaultHostBase)
+}
+
+// NewAPIWithHost is NewAPI with an overridable host, for pointing at an
+// in-memory fake Telegram server in tests/smoketests - never used against a
+// real bot token in production.
+func NewAPIWithHost(token, hostBase string) *API {
 	return &API{
-		token: token,
+		token:    token,
+		hostBase: hostBase,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
 	}
+}
+
+func (a *API) botURL(method string) string {
+	return a.hostBase + "/bot" + a.token + "/" + method
 }
 
 type Update struct {
@@ -120,7 +133,7 @@ func (a *API) SendDocument(channelID int64, filename string, data []byte) (retry
 		return 0, fmt.Errorf("close multipart: %w", err)
 	}
 
-	url := apiBase + a.token + "/sendDocument"
+	url := a.botURL("sendDocument")
 	req, err := http.NewRequest("POST", url, &body)
 	if err != nil {
 		return 0, err
@@ -158,7 +171,7 @@ func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err err
 		return 0, err
 	}
 
-	url := apiBase + a.token + "/sendMessage"
+	url := a.botURL("sendMessage")
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -185,8 +198,8 @@ func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err err
 
 // GetUpdates long-polls for updates.
 func (a *API) GetUpdates(offset int, timeout int) ([]Update, error) {
-	url := fmt.Sprintf("%s%s/getUpdates?offset=%d&timeout=%d&allowed_updates=[\"channel_post\"]",
-		apiBase, a.token, offset, timeout)
+	url := fmt.Sprintf("%s?offset=%d&timeout=%d&allowed_updates=[\"channel_post\"]",
+		a.botURL("getUpdates"), offset, timeout)
 
 	resp, err := a.client.Get(url)
 	if err != nil {
@@ -213,7 +226,7 @@ func (a *API) GetUpdates(offset int, timeout int) ([]Update, error) {
 // DownloadFile downloads a file by file_id.
 func (a *API) DownloadFile(fileID string) ([]byte, error) {
 	// Step 1: getFile to get file_path
-	url := fmt.Sprintf("%s%s/getFile?file_id=%s", apiBase, a.token, fileID)
+	url := fmt.Sprintf("%s?file_id=%s", a.botURL("getFile"), fileID)
 	resp, err := a.client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
@@ -235,7 +248,7 @@ func (a *API) DownloadFile(fileID string) ([]byte, error) {
 	}
 
 	// Step 2: download from file path
-	dlURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", a.token, fr.FilePath)
+	dlURL := fmt.Sprintf("%s/file/bot%s/%s", a.hostBase, a.token, fr.FilePath)
 	dlResp, err := a.client.Get(dlURL)
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
@@ -247,7 +260,7 @@ func (a *API) DownloadFile(fileID string) ([]byte, error) {
 
 // GetMe returns this bot's user info.
 func (a *API) GetMe() (*User, error) {
-	url := apiBase + a.token + "/getMe"
+	url := a.botURL("getMe")
 	resp, err := a.client.Get(url)
 	if err != nil {
 		return nil, err

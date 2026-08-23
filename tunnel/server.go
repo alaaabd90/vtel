@@ -40,7 +40,15 @@ func (s *Server) Run() {
 
 func (s *Server) recvLoop(lr *linkRuntime) {
 	for data := range lr.poller.RecvChan() {
-		frames, err := protocol.DecompressBatch(data)
+		compressed, ok, err := protocol.OpenEnvelope(lr.key, data)
+		if err != nil {
+			fmt.Printf("[server] link %d envelope open error: %v\n", lr.link.ID, err)
+			continue
+		}
+		if !ok {
+			continue // wrong key, tampered, or not a vtel envelope - skip silently
+		}
+		frames, err := protocol.DecompressBatch(compressed)
 		if err != nil {
 			fmt.Printf("[server] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
@@ -55,16 +63,21 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 	target := cp.String()
 	fmt.Printf("[server] link %d CONNECT %08x -> %s\n", lr.link.ID, connID, target)
 
-	// Dial the target
+	// Register the connection before dialing: net.DialTimeout can take real
+	// time, and any TypeData for connID that races ahead of it (e.g. a
+	// retried batch redelivering CONNECT+first-DATA together) would
+	// otherwise find no registered conn and be dropped as "unknown
+	// connection". Registering first means it buffers in DataCh instead.
+	tc := lr.mux.RegisterConn(connID)
+
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		fmt.Printf("[server] link %d dial failed %08x -> %s: %v\n", lr.link.ID, connID, target, err)
-		lr.mux.SendClose(connID)
+		lr.mux.RemoveConn(connID)
+		lr.mux.SendReset(connID)
 		return
 	}
 
-	// Register connection and send ACK
-	tc := lr.mux.RegisterConn(connID)
 	lr.batcher.Add(&protocol.Frame{
 		Type:   protocol.TypeConnectACK,
 		ConnID: connID,

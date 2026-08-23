@@ -26,6 +26,11 @@ func TestSendWithRetryDoesNotRetryPermanentErrors(t *testing.T) {
 func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 	t.Parallel()
 
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+
 	flushedAt := make(chan time.Time, 1)
 	batcher := newBatcher(func(seq uint64, data []byte) error {
 		select {
@@ -33,7 +38,7 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 		default:
 		}
 		return nil
-	}, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
+	}, key, 120*time.Millisecond, 220*time.Millisecond, 1<<20)
 	defer batcher.Stop()
 
 	frame := &Frame{

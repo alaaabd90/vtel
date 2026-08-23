@@ -6,12 +6,19 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/alaaabd90/vtel/protocol"
 	"github.com/alaaabd90/vtel/telegram"
 	"github.com/alaaabd90/vtel/tunnel"
 )
 
 func main() {
 	cfg := ParseConfig()
+
+	key, err := protocol.DeriveKey(cfg.Secret)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid secret: %v\n", err)
+		os.Exit(1)
+	}
 
 	specs := make([]tunnel.LinkSpec, 0, len(cfg.Links))
 	for i, lc := range cfg.Links {
@@ -28,6 +35,7 @@ func main() {
 			BotID:     me.ID,
 			PeerBotID: lc.PeerBotID,
 			ChannelID: lc.ChannelID,
+			Key:       key,
 		})
 	}
 	fmt.Printf("[vtel] mode: %s, %d link(s)\n", cfg.Mode, len(specs))

@@ -23,12 +23,14 @@ const (
 	maxRetryBackoff     = 30 * time.Second
 )
 
-// Batcher collects frames and flushes them as gzip-compressed batches.
+// Batcher collects frames and flushes them as gzip-compressed, AES-256-GCM
+// sealed batches.
 type Batcher struct {
 	mu     sync.Mutex
 	buf    bytes.Buffer
 	seqNum atomic.Uint64
 	sendFn func(seq uint64, data []byte) error
+	key    []byte // AES-256-GCM key from DeriveKey, applied to every flush
 
 	idleTimeout        time.Duration
 	maxFlushDelay      time.Duration
@@ -40,13 +42,14 @@ type Batcher struct {
 	done               chan struct{}
 }
 
-func NewBatcher(sendFn func(seq uint64, data []byte) error) *Batcher {
-	return newBatcher(sendFn, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
+func NewBatcher(sendFn func(seq uint64, data []byte) error, key []byte) *Batcher {
+	return newBatcher(sendFn, key, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
 }
 
-func newBatcher(sendFn func(seq uint64, data []byte) error, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
+func newBatcher(sendFn func(seq uint64, data []byte) error, key []byte, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
 	b := &Batcher{
 		sendFn:             sendFn,
+		key:                key,
 		idleTimeout:        idleTimeout,
 		maxFlushDelay:      maxFlushDelay,
 		dataFlushThreshold: dataFlushThreshold,
@@ -212,7 +215,13 @@ func (b *Batcher) flushRaw(raw []byte) {
 		return
 	}
 
-	b.sendWithRetry(compressed)
+	sealed, err := SealEnvelope(b.key, compressed)
+	if err != nil {
+		fmt.Printf("[batcher] envelope seal error: %v\n", err)
+		return
+	}
+
+	b.sendWithRetry(sealed)
 }
 
 // sendWithRetry sends a compressed batch with exponential backoff retries.

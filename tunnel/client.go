@@ -72,7 +72,15 @@ func (c *Client) Run() error {
 
 func (c *Client) recvLoop(lr *linkRuntime) {
 	for data := range lr.poller.RecvChan() {
-		frames, err := protocol.DecompressBatch(data)
+		compressed, ok, err := protocol.OpenEnvelope(lr.key, data)
+		if err != nil {
+			fmt.Printf("[client] link %d envelope open error: %v\n", lr.link.ID, err)
+			continue
+		}
+		if !ok {
+			continue // wrong key, tampered, or not a vtel envelope - skip silently
+		}
+		frames, err := protocol.DecompressBatch(compressed)
 		if err != nil {
 			fmt.Printf("[client] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
