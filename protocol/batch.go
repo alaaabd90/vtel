@@ -21,6 +21,13 @@ const (
 	maxSendRetries      = 5
 	initialRetryBackoff = 1 * time.Second
 	maxRetryBackoff     = 30 * time.Second
+
+	// StreamPriorityBytes is the per-connection one-way latch threshold
+	// ported from gdrive's priority classification (internal/gdrive/mux.go):
+	// a stream's TypeData frames are urgent until this many bytes have been
+	// sent on it, then permanently demoted to normal. Control frames
+	// (CONNECT/CONNECT_ACK/CLOSE/RESET) are always urgent regardless.
+	StreamPriorityBytes = 512 * 1024
 )
 
 // CompressionLevel is a zstd encoder level, re-exported so callers outside
@@ -48,11 +55,23 @@ func ParseCompressionLevel(s string) (CompressionLevel, error) {
 // Batcher collects frames and flushes them as zstd-compressed, AES-256-GCM
 // sealed batches.
 type Batcher struct {
-	mu     sync.Mutex
-	buf    bytes.Buffer
-	seqNum atomic.Uint64
-	sendFn func(seq uint64, data []byte) error
-	key    []byte // AES-256-GCM key from DeriveKey, applied to every flush
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	hasUrgent bool // whether the in-progress batch contains any urgent frame
+	seqNum    atomic.Uint64
+	sendFn    func(seq uint64, data []byte, urgent bool) error
+	key       []byte // AES-256-GCM key from DeriveKey, applied to every flush
+
+	// urgentTok/sharedTok are a 2-slot concurrency gate ported from gdrive's
+	// urgent/normal priority-reserve concept (internal/gdrive/tunnel.go),
+	// right-sized from gdrive's max/4 worker-pool split (meaningless at
+	// vtel's realistic 1-2-in-flight-per-link scale): one urgent-reserved
+	// slot, one shared slot. Urgent sends may use either (falling back to
+	// the shared slot if the reserved one is busy); normal sends only ever
+	// use the shared slot, so a slow bulk upload can never fully block
+	// urgent traffic on this link. See acquireSlot.
+	urgentTok chan struct{}
+	sharedTok chan struct{}
 
 	// enc/dec are constructed once and reused across every flush/receive on
 	// this Batcher - a fresh zstd encoder per flush is a known real
@@ -79,11 +98,11 @@ type Batcher struct {
 	lastMeasureNS  atomic.Int64
 }
 
-func NewBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level CompressionLevel) *Batcher {
+func NewBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel) *Batcher {
 	return newBatcher(sendFn, key, level, FlushIdleTimeout, MaxFlushDelay, DataFlushThreshold)
 }
 
-func newBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level CompressionLevel, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
+func newBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel, idleTimeout, maxFlushDelay time.Duration, dataFlushThreshold int) *Batcher {
 	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
 	if err != nil {
 		// Only reachable with an invalid EncoderLevel constant, which this
@@ -107,15 +126,37 @@ func newBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level Co
 		activityCh:         make(chan struct{}, 1),
 		flushCh:            make(chan struct{}, 1),
 		done:               make(chan struct{}),
+		urgentTok:          make(chan struct{}, 1),
+		sharedTok:          make(chan struct{}, 1),
 	}
+	b.urgentTok <- struct{}{}
+	b.sharedTok <- struct{}{}
 	go b.flushLoop()
 	return b
 }
 
+// acquireSlot blocks until a send slot is available for this Batcher's
+// 2-slot concurrency gate (see the urgentTok/sharedTok field doc), returning
+// a func to release it.
+func (b *Batcher) acquireSlot(urgent bool) func() {
+	if urgent {
+		select {
+		case <-b.urgentTok:
+			return func() { b.urgentTok <- struct{}{} }
+		default:
+		}
+	}
+	<-b.sharedTok
+	return func() { b.sharedTok <- struct{}{} }
+}
+
 // Add adds a frame to the current batch. DATA frames are flushed after a quiet
 // period, while control frames flush immediately so connection setup/teardown
-// does not pick up the batching delay.
-func (b *Batcher) Add(f *Frame) {
+// does not pick up the batching delay. urgent marks whether this frame should
+// be eligible for the reserved concurrency slot at send time (see acquireSlot) -
+// callers classify control frames as always urgent and TypeData frames via
+// each stream's one-way priority latch (see tunnel.Conn).
+func (b *Batcher) Add(f *Frame, urgent bool) {
 	data := f.Marshal()
 	now := time.Now()
 
@@ -126,6 +167,9 @@ func (b *Batcher) Add(f *Frame) {
 	b.lastQueuedAt = now
 	b.buf.Write(data)
 	bufLen := b.buf.Len()
+	if urgent {
+		b.hasUrgent = true
+	}
 	b.mu.Unlock()
 
 	shouldFlush := bufLen >= MaxBatchSize
@@ -225,7 +269,14 @@ func (b *Batcher) flushLoop() {
 	}
 }
 
-// Flush compresses and sends the current batch.
+// Flush compresses and sends the current batch. The batch's sequence number
+// is minted here, synchronously with the flushLoop goroutine, so it reflects
+// batch-creation order even though the actual compress/seal/send work below
+// runs concurrently on its own goroutine (see acquireSlot) - the poller on
+// the receiving end sorts by this seq before dispatching frames, so
+// creation-order sequencing is the only ordering guarantee that actually
+// matters; out-of-order arrival/completion of the network sends themselves
+// is fine by design.
 func (b *Batcher) Flush() {
 	b.mu.Lock()
 	if b.buf.Len() == 0 {
@@ -237,10 +288,13 @@ func (b *Batcher) Flush() {
 	b.buf.Reset()
 	b.batchStartedAt = time.Time{}
 	b.lastQueuedAt = time.Time{}
+	urgent := b.hasUrgent
+	b.hasUrgent = false
 	b.mu.Unlock()
 
+	seq := b.seqNum.Add(1)
 	b.updateBytesPerSec(int64(len(raw)))
-	b.flushRaw(raw)
+	go b.flushRaw(seq, raw, urgent)
 }
 
 func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.Time) {
@@ -291,15 +345,24 @@ func (b *Batcher) updateBytesPerSec(newBytes int64) {
 	}
 }
 
-// flushRaw compresses raw bytes and sends, splitting if compressed size exceeds the limit.
-func (b *Batcher) flushRaw(raw []byte) {
+// flushRaw compresses raw bytes and sends, splitting if compressed size
+// exceeds the limit. Runs on its own goroutine per Flush call (or per split
+// half); the actual network send only proceeds once acquireSlot grants a
+// concurrency slot, so a slow bulk send here can never block flushLoop from
+// starting the next batch.
+func (b *Batcher) flushRaw(seq uint64, raw []byte, urgent bool) {
 	compressed := b.enc.EncodeAll(raw, nil)
 
 	if len(compressed) > MaxCompressedSize {
-		// Split raw in half and send as two batches
+		// Split raw in half and send as two batches. The first half keeps
+		// this batch's seq; the second mints a fresh one - both are rare
+		// (only once a single batch alone exceeds ~19MB compressed), so
+		// their ordering relative to unrelated concurrently-flushing
+		// batches is not load-bearing the way the common case's
+		// creation-order seq is.
 		mid := len(raw) / 2
-		b.flushRaw(raw[:mid])
-		b.flushRaw(raw[mid:])
+		b.flushRaw(seq, raw[:mid], urgent)
+		b.flushRaw(b.seqNum.Add(1), raw[mid:], urgent)
 		return
 	}
 
@@ -309,16 +372,17 @@ func (b *Batcher) flushRaw(raw []byte) {
 		return
 	}
 
-	b.sendWithRetry(sealed)
+	release := b.acquireSlot(urgent)
+	defer release()
+	b.sendWithRetry(seq, sealed, urgent)
 }
 
 // sendWithRetry sends a compressed batch with exponential backoff retries.
-func (b *Batcher) sendWithRetry(compressed []byte) {
-	seq := b.seqNum.Add(1)
+func (b *Batcher) sendWithRetry(seq uint64, compressed []byte, urgent bool) {
 	backoff := initialRetryBackoff
 
 	for attempt := 0; attempt <= maxSendRetries; attempt++ {
-		err := b.sendFn(seq, compressed)
+		err := b.sendFn(seq, compressed, urgent)
 		if err == nil {
 			return
 		}

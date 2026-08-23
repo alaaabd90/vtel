@@ -32,8 +32,12 @@ func NewSender(api *API, botID int64, channelID int64) *Sender {
 
 // Send sends a compressed batch. Small batches go as text messages when the
 // fully encoded payload fits Telegram's message length limit; larger ones go as
-// documents to avoid oversized sendMessage requests.
-func (s *Sender) Send(seq uint64, data []byte) error {
+// documents to avoid oversized sendMessage requests. urgent classifies the
+// batch per Batcher.Add's doc comment; Send doesn't yet treat it
+// differently (both paths already go through the same RateLimiter), but it's
+// plumbed through so a future traffic-shaping stage (e.g. skipping jitter
+// for control-frame batches) has it available without another signature change.
+func (s *Sender) Send(seq uint64, data []byte, urgent bool) error {
 	if fitsTextBatch(s.botID, seq, data) {
 		text := formatTextBatch(s.botID, seq, data)
 		return s.sendRetry(seq, func() (int, error) {

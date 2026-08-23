@@ -81,7 +81,7 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 	lr.batcher.Add(&protocol.Frame{
 		Type:   protocol.TypeConnectACK,
 		ConnID: connID,
-	})
+	}, true)
 
 	// Relay traffic
 	lr.mux.Relay(conn, tc)

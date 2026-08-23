@@ -10,13 +10,13 @@ func TestSendWithRetryDoesNotRetryPermanentErrors(t *testing.T) {
 
 	calls := 0
 	batcher := &Batcher{
-		sendFn: func(seq uint64, data []byte) error {
+		sendFn: func(seq uint64, data []byte, urgent bool) error {
 			calls++
 			return permanentBatchError{}
 		},
 	}
 
-	batcher.sendWithRetry([]byte("payload"))
+	batcher.sendWithRetry(1, []byte("payload"), false)
 
 	if calls != 1 {
 		t.Fatalf("sendWithRetry() calls = %d, want 1", calls)
@@ -36,7 +36,7 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 	}
 
 	flushedAt := make(chan time.Time, 1)
-	batcher := newBatcher(func(seq uint64, data []byte) error {
+	batcher := newBatcher(func(seq uint64, data []byte, urgent bool) error {
 		select {
 		case flushedAt <- time.Now():
 		default:
@@ -52,11 +52,11 @@ func TestBatcherFlushesContinuousDataOnMaxDelay(t *testing.T) {
 	}
 
 	start := time.Now()
-	batcher.Add(frame)
+	batcher.Add(frame, false)
 	time.Sleep(80 * time.Millisecond)
-	batcher.Add(frame)
+	batcher.Add(frame, false)
 	time.Sleep(80 * time.Millisecond)
-	batcher.Add(frame)
+	batcher.Add(frame, false)
 
 	select {
 	case ts := <-flushedAt:
@@ -77,13 +77,13 @@ func TestBatcherRoundTripsThroughEnvelopeAndZstd(t *testing.T) {
 	}
 
 	sent := make(chan []byte, 1)
-	batcher := NewBatcher(func(seq uint64, data []byte) error {
+	batcher := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
 		sent <- data
 		return nil
 	}, key, zstdTestLevel(t))
 	defer batcher.Stop()
 
-	batcher.Add(&Frame{Type: TypeConnect, ConnID: 7, Payload: []byte("connect payload")})
+	batcher.Add(&Frame{Type: TypeConnect, ConnID: 7, Payload: []byte("connect payload")}, true)
 
 	var sealed []byte
 	select {
@@ -157,6 +157,94 @@ func TestUpdateBytesPerSecMeasuresAfterOneSecondWindow(t *testing.T) {
 
 	if got := b.bytesPerSec.Load(); got <= 0 {
 		t.Fatalf("bytesPerSec after window elapsed = %d, want > 0", got)
+	}
+}
+
+func TestAcquireSlotUrgentDoesNotBlockBehindBusySharedSlot(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	defer b.Stop()
+
+	releaseShared := b.acquireSlot(false) // occupy the shared slot, never released in this test
+	_ = releaseShared
+
+	done := make(chan struct{})
+	go func() {
+		release := b.acquireSlot(true) // should succeed immediately via the reserved slot
+		release()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("urgent acquireSlot blocked behind a busy shared slot")
+	}
+}
+
+func TestAcquireSlotNormalBlocksUntilSharedSlotFrees(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	defer b.Stop()
+
+	releaseShared := b.acquireSlot(false)
+
+	acquired := make(chan struct{})
+	go func() {
+		release := b.acquireSlot(false) // normal must wait for the shared slot
+		close(acquired)
+		release()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("normal acquireSlot proceeded while the shared slot was busy")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	releaseShared()
+
+	select {
+	case <-acquired:
+	case <-time.After(1 * time.Second):
+		t.Fatal("normal acquireSlot never proceeded after the shared slot freed")
+	}
+}
+
+func TestAcquireSlotUrgentFallsBackToSharedWhenReservedBusy(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t))
+	defer b.Stop()
+
+	releaseUrgent := b.acquireSlot(true) // occupy the reserved slot
+	defer releaseUrgent()
+
+	done := make(chan struct{})
+	go func() {
+		release := b.acquireSlot(true) // reserved is busy -> falls back to the free shared slot
+		release()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("second urgent acquireSlot did not fall back to the shared slot")
 	}
 }
 

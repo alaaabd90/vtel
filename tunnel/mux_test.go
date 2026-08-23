@@ -20,7 +20,7 @@ func recvOrTimeout(t *testing.T, ch <-chan []byte, want string) {
 }
 
 func TestDeliverOrderedBuffersOutOfOrderFrames(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) {})
 	c := m.RegisterConn(1)
 
 	// Deliver Seq 2, then 1, then 0 - out of order. Only once Seq 0 arrives
@@ -35,7 +35,7 @@ func TestDeliverOrderedBuffersOutOfOrderFrames(t *testing.T) {
 }
 
 func TestDeliverOrderedDropsDuplicateSeq(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) {})
 	c := m.RegisterConn(1)
 
 	m.HandleFrame(&protocol.Frame{Type: protocol.TypeData, ConnID: 1, SeqNum: 0, Payload: []byte("A")})
@@ -62,7 +62,7 @@ func TestDeliverOrderedDropsDuplicateSeq(t *testing.T) {
 // returned, so any TypeData racing ahead of a slow dial found no conn in
 // m.conns and was silently discarded.
 func TestRegisterConnBeforeDialBuffersMidDialData(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) {})
 
 	// RegisterConn happens first, exactly as Server.handleConnect now does
 	// before calling net.DialTimeout.
@@ -77,14 +77,14 @@ func TestRegisterConnBeforeDialBuffersMidDialData(t *testing.T) {
 }
 
 func TestHandleFrameDataForUnregisteredConnIsDroppedNotPanicking(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) {})
 	// No RegisterConn/NewConn call for ID 99 - must be a silent no-op, not a panic.
 	m.HandleFrame(&protocol.Frame{Type: protocol.TypeData, ConnID: 99, SeqNum: 0, Payload: []byte("dropped")})
 }
 
 func TestSendDataStampsIncrementingSeq(t *testing.T) {
 	var got []*protocol.Frame
-	m := NewMux(func(f *protocol.Frame) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) {
 		got = append(got, f)
 	})
 	c := m.NewConn()
@@ -100,9 +100,63 @@ func TestSendDataStampsIncrementingSeq(t *testing.T) {
 	}
 }
 
+func TestSendDataClassifiesUrgencyViaPriorityLatch(t *testing.T) {
+	var urgencies []bool
+	m := NewMux(func(f *protocol.Frame, urgent bool) {
+		urgencies = append(urgencies, urgent)
+	})
+	c := m.NewConn()
+
+	// First send, well under the threshold: urgent.
+	m.SendData(c.ID, make([]byte, 1024))
+	// Second send pushes cumulative bytes past the threshold: still urgent
+	// (it's the frame that crosses the line), but the latch now flips.
+	m.SendData(c.ID, make([]byte, protocol.StreamPriorityBytes))
+	// Third send: latch is now demoted, so this one is normal.
+	m.SendData(c.ID, make([]byte, 1))
+
+	if len(urgencies) != 3 {
+		t.Fatalf("got %d sends, want 3", len(urgencies))
+	}
+	if !urgencies[0] {
+		t.Error("first send under threshold: want urgent=true")
+	}
+	if !urgencies[1] {
+		t.Error("send that crosses the threshold: want urgent=true")
+	}
+	if urgencies[2] {
+		t.Error("send after the threshold was crossed: want urgent=false")
+	}
+}
+
+func TestControlFramesAreAlwaysUrgent(t *testing.T) {
+	var urgencies []bool
+	m := NewMux(func(f *protocol.Frame, urgent bool) {
+		urgencies = append(urgencies, urgent)
+	})
+	c := m.NewConn()
+
+	// Demote the conn's data priority latch first...
+	m.SendData(c.ID, make([]byte, protocol.StreamPriorityBytes+1))
+	m.SendData(c.ID, make([]byte, 1)) // now normal
+
+	m.SendClose(c.ID)
+	m.SendReset(c.ID)
+
+	if len(urgencies) != 4 {
+		t.Fatalf("got %d sends, want 4", len(urgencies))
+	}
+	if urgencies[1] {
+		t.Fatal("expected the demoted TypeData send to be normal")
+	}
+	if !urgencies[len(urgencies)-2] || !urgencies[len(urgencies)-1] {
+		t.Fatalf("SendClose/SendReset must always be urgent, got %v", urgencies)
+	}
+}
+
 func TestTypeCloseAndTypeResetBothCloseConn(t *testing.T) {
 	for _, typ := range []byte{protocol.TypeClose, protocol.TypeReset} {
-		m := NewMux(func(f *protocol.Frame) {})
+		m := NewMux(func(f *protocol.Frame, urgent bool) {})
 		c := m.RegisterConn(1)
 
 		m.HandleFrame(&protocol.Frame{Type: typ, ConnID: 1})

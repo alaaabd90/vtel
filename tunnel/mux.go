@@ -30,12 +30,35 @@ type Conn struct {
 	recvMu       sync.Mutex
 	recvExpected uint32
 	recvPending  map[uint32][]byte
+
+	// prioritySent/priorityDemoted are a one-way latch ported from gdrive's
+	// per-stream priority classification (internal/gdrive/mux.go): this
+	// stream's TypeData frames are urgent until protocol.StreamPriorityBytes
+	// have been sent on it, then permanently demoted to normal. See
+	// classifyDataUrgency.
+	prioritySent    atomic.Uint64
+	priorityDemoted atomic.Bool
 }
 
 // nextSendSeq returns this Conn's next outbound TypeData sequence number.
 // The first call returns 0, matching recvExpected's initial value.
 func (c *Conn) nextSendSeq() uint32 {
 	return c.sendSeq.Add(1) - 1
+}
+
+// classifyDataUrgency reports whether a TypeData frame of n bytes about to
+// be sent on this Conn should be treated as urgent, and advances the latch.
+// The frame that pushes prioritySent past the threshold is still classified
+// urgent (it was sent while under it); only frames after that are demoted.
+func (c *Conn) classifyDataUrgency(n int) bool {
+	if c.priorityDemoted.Load() {
+		return false
+	}
+	newTotal := c.prioritySent.Add(uint64(n))
+	if newTotal > protocol.StreamPriorityBytes {
+		c.priorityDemoted.Store(true)
+	}
+	return true
 }
 
 func (c *Conn) MarkUsed() {
@@ -64,8 +87,9 @@ type Mux struct {
 	mu    sync.RWMutex
 	conns map[uint32]*Conn
 
-	// sendFrame is called to send a frame through the tunnel
-	sendFrame func(*protocol.Frame)
+	// sendFrame is called to send a frame through the tunnel. urgent is
+	// this frame's priority classification, forwarded to Batcher.Add.
+	sendFrame func(f *protocol.Frame, urgent bool)
 
 	// onConnect is called when a CONNECT frame is received (server-side)
 	onConnect func(connID uint32, payload *protocol.ConnectPayload)
@@ -76,7 +100,7 @@ type Mux struct {
 	done chan struct{}
 }
 
-func NewMux(sendFrame func(*protocol.Frame)) *Mux {
+func NewMux(sendFrame func(f *protocol.Frame, urgent bool)) *Mux {
 	m := &Mux{
 		conns:     make(map[uint32]*Conn),
 		sendFrame: sendFrame,
@@ -222,38 +246,41 @@ func (m *Mux) deliverOrdered(c *Conn, seq uint32, payload []byte) {
 }
 
 // SendData sends a DATA frame for a connection, stamped with that
-// connection's next sequence number.
+// connection's next sequence number and classified urgent/normal via the
+// connection's one-way priority latch (see Conn.classifyDataUrgency).
 func (m *Mux) SendData(connID uint32, data []byte) {
 	c := m.GetConn(connID)
 	var seq uint32
+	urgent := false
 	if c != nil {
 		seq = c.nextSendSeq()
+		urgent = c.classifyDataUrgency(len(data))
 	}
 	m.sendFrame(&protocol.Frame{
 		Type:    protocol.TypeData,
 		ConnID:  connID,
 		SeqNum:  seq,
 		Payload: data,
-	})
+	}, urgent)
 }
 
 // SendClose sends a graceful CLOSE frame (peer should finish delivering
-// already-buffered data before tearing the connection down).
+// already-buffered data before tearing the connection down). Always urgent.
 func (m *Mux) SendClose(connID uint32) {
 	m.sendFrame(&protocol.Frame{
 		Type:   protocol.TypeClose,
 		ConnID: connID,
-	})
+	}, true)
 }
 
 // SendReset sends a hard-abort RESET frame, distinct from the graceful
 // SendClose - used where there is nothing left worth delivering (e.g. a
-// dial failure with no data ever sent).
+// dial failure with no data ever sent). Always urgent.
 func (m *Mux) SendReset(connID uint32) {
 	m.sendFrame(&protocol.Frame{
 		Type:   protocol.TypeReset,
 		ConnID: connID,
-	})
+	}, true)
 }
 
 // gcLoop removes idle connections every minute.

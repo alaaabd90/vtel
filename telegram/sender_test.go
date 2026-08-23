@@ -32,7 +32,7 @@ func TestSenderUsesTextAtExactMessageLimit(t *testing.T) {
 	sender := NewSender(api, 1234567890, 42)
 	data := bytes.Repeat([]byte("x"), 3054)
 
-	if err := sender.Send(1, data); err != nil {
+	if err := sender.Send(1, data, false); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if messageCalls != 1 {
@@ -67,7 +67,7 @@ func TestSenderFallsBackToDocumentWhenEncodedTextIsTooLong(t *testing.T) {
 	sender := NewSender(api, 1234567890, 42)
 	data := bytes.Repeat([]byte("x"), 3055)
 
-	if err := sender.Send(1, data); err != nil {
+	if err := sender.Send(1, data, false); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if messageCalls != 0 {

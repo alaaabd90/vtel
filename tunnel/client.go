@@ -130,7 +130,7 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 		Type:    protocol.TypeConnect,
 		ConnID:  tc.ID,
 		Payload: cp.Marshal(),
-	})
+	}, true)
 
 	fmt.Printf("[client] link %d CONNECT %08x -> %s\n", lr.link.ID, tc.ID, req.String())
 
