@@ -1,16 +1,37 @@
-# teltun
+# vtel
 
-A SOCKS5 proxy that tunnels traffic through Telegram. Client runs a local SOCKS5 server; traffic is relayed as compressed documents through a private Telegram channel to a server with internet access.
+A multi-bot SOCKS5 proxy that tunnels traffic through Telegram. The client
+runs a local SOCKS5 server; traffic is encrypted, compressed, batched, and
+relayed as Telegram bot messages/documents through a pool of private
+channels to a server with internet access.
+
+Built on top of [teltun](https://github.com/alaaabd90/teltun) (a single-bot
+version of the same idea), generalized to a health-aware load-balanced pool
+of bots/channels and hardened with patterns ported from
+[gdrive](https://github.com/alaaabd90/gdrive), a sibling project doing the
+same thing over Google Drive — see "What's ported from gdrive, and what
+isn't" below.
 
 ## How it works
 
-Two Telegram bots communicate via a shared private channel. Bot A (client) accepts local SOCKS5 connections and sends data upstream. Bot B (server) receives it, dials the target, and sends responses back. Traffic is batched, gzip-compressed, and sent as Telegram documents for efficiency.
+Each **link** is one pair of bots (a client-side bot and a server-side bot)
+sharing one private Telegram channel. The client SOCKS5-accepts a
+connection, picks the least-loaded healthy link from the pool, and sends an
+encrypted, compressed batch of frames over it; the server-side bot receives
+it, dials the real target, and relays data back the same way. A pool of N
+links behaves like N independent lanes: a stream picks one link for its
+whole lifetime, and the pool automatically avoids/retries around links that
+are failing or stalled.
 
 ## Setup
 
-1. Create two bots via [@BotFather](https://t.me/BotFather)
-2. Create a private Telegram channel and add both bots as admins
-3. Get the channel's API chat ID (post a message in the channel, then check `getUpdates`):
+For each link you want in the pool:
+
+1. Create two bots via [@BotFather](https://t.me/BotFather) — one for the
+   client role, one for the server role.
+2. Create a private Telegram channel and add both bots as admins.
+3. Get the channel's chat ID (post a message in the channel, then check
+   `getUpdates`):
    ```
    curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[].channel_post.chat.id'
    ```
@@ -19,39 +40,201 @@ Two Telegram bots communicate via a shared private channel. Bot A (client) accep
    curl -s "https://api.telegram.org/bot<TOKEN>/getMe" | jq '.result.id'
    ```
 
+Repeat for as many links as you want in the pool — a handful is already a
+meaningful independent backup channel; you don't need 20 to get value from
+this. See `config.example.json` for the config shape (it shows the spec's
+originally-discussed default of 5 channels × 4 bots = 20 links, purely to
+illustrate the format at scale).
+
 ## Build
 
 ```
-go build -o teltun .
+go build -o vtel ./cmd/vtel
 ```
+
+or via Docker:
+
+```
+docker build -t vtel .
+```
+
+(The Docker build itself hasn't been exercised in this environment — no
+Docker daemon was available while developing this — though the underlying
+`go build ./cmd/vtel` command it runs has been run and verified directly
+many times.)
 
 ## Usage
 
-**Server** (on the machine with internet access):
+Both client and server take one JSON config file via `-config`:
+
 ```
-./teltun -mode server -token $BOT_B_TOKEN -peer-bot-id $BOT_A_ID -channel-id $CHANNEL_ID
+./vtel -config config.json
 ```
 
-**Client** (on the local machine):
-```
-./teltun -mode client -token $BOT_A_TOKEN -peer-bot-id $BOT_B_ID -channel-id $CHANNEL_ID -listen 127.0.0.1:1080
+**Server** config (`mode: "server"`) needs one `LinkConfig` per link, each
+with that link's *server-side* bot token, the *client-side* bot's user ID as
+`peer_bot_id`, and the shared channel ID.
+
+**Client** config (`mode: "client"`) is the mirror image: each link's
+*client-side* bot token, the *server-side* bot's user ID as `peer_bot_id`,
+the same channel ID, plus `listen` (SOCKS5 address, default
+`127.0.0.1:1080`).
+
+Both sides must set the same `secret` — it derives the AES-256-GCM key used
+to encrypt every batch (see Security below).
+
+```json
+{
+  "mode": "client",
+  "listen": "127.0.0.1:1080",
+  "secret": "a long random shared secret",
+  "compression_level": "fastest",
+  "reject_ipv6": false,
+  "links": [
+    { "token": "...", "peer_bot_id": 123, "channel_id": -100456 },
+    { "token": "...", "peer_bot_id": 124, "channel_id": -100457 }
+  ]
+}
 ```
 
-Then point any SOCKS5 client at `127.0.0.1:1080`:
+Then point any SOCKS5 client at the listen address:
 ```
 curl -x socks5h://127.0.0.1:1080 https://ipv4.ident.me
 ```
 
-### Flags
+### Config fields
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-mode` | `client` or `server` | required |
-| `-token` | This bot's API token | required |
-| `-peer-bot-id` | The other bot's user ID | required |
-| `-channel-id` | Private channel chat ID | required |
-| `-listen` | SOCKS5 listen address (client only) | `127.0.0.1:1080` |
+| Field | Description | Default |
+|---|---|---|
+| `mode` | `"client"` or `"server"` | required |
+| `listen` | SOCKS5 listen address (client only) | `127.0.0.1:1080` |
+| `secret` | Shared secret both sides derive the AEAD key from | required |
+| `compression_level` | `fastest` \| `default` \| `better` \| `best` | `fastest` |
+| `reject_ipv6` | Client only: immediately reject IPv6 literal SOCKS targets | `false` |
+| `quiet_hours` | `{start_hour, end_hour, timezone}` — widens the flush cadence during this daily window instead of pausing (see Traffic shaping below) | disabled |
+| `links` | Array of `{token, peer_bot_id, channel_id}` | required, ≥1 |
+
+## Security
+
+Every batch is AES-256-GCM sealed (random 12-byte nonce, key derived from
+`secret` via SHA-256) before it's compressed and uploaded, and verified
+before being decompressed on receive. This is a real gap teltun itself
+doesn't close — without it, confidentiality rests entirely on the channel
+being private. Wrong-key or tampered/corrupt data is silently skipped
+rather than surfaced as an error, the same way non-vtel content posted to
+the shared chat is silently skipped.
+
+## Traffic shaping ("look normal" features)
+
+**Honest framing: these reduce *pattern* detectability, not *volume*
+visibility.** An observer who already sees total bytes/day sent through
+your Telegram bots learns nothing new is hidden by any of the following —
+none of it reduces how much data moves or when, only how regular/labeled it
+looks:
+
+- **Timing jitter**: ±15% randomness on the batching timers, so flushes
+  don't happen at an exact fixed cadence.
+- **Quiet hours**: during a configured daily window, the flush cadence
+  widens (3×) rather than traffic stopping entirely — a full on/off pattern
+  is itself a detectable signal.
+- **Filename rotation**: document uploads rotate among generic-but-honest
+  base names (`backup_`, `export_`, `archive_...bin.zst`) rather than one
+  fixed name. Deliberately **not** faked as real media (e.g. naming a zstd
+  blob `IMG_1234.jpg`) — a fake media extension on non-media content is
+  itself a worse fingerprint than an honest generic name.
+- **Size padding**: deliberately **not** implemented. Artificial padding
+  costs real bandwidth for no confidentiality gain, and jitter plus the
+  existing batching size thresholds already vary batch sizes naturally.
+
+## What's ported from gdrive, and what isn't
+
+vtel harvests specific, already-debugged mechanisms from gdrive rather than
+re-deriving them from scratch — but only the subset that actually fits
+vtel's much smaller scale (5-20 bots, not Drive-account-scale parallelism).
+
+**Ported:**
+- **Health-aware load balancing** (`pool/pool.go`, from
+  `cmd/gdrive-exit/lb.go`): least-connections selection among healthy
+  links, consecutive-failure blacklisting with cooldown, graceful
+  degradation when every link looks unhealthy rather than hard-refusing.
+- **Seq-based frame ordering/dedup** (`tunnel/mux.go`): out-of-order frames
+  buffer and drain in order; stale/duplicate seqs are dropped.
+- **Throughput-adaptive batching** (`protocol/batch.go`, from
+  `muxLane.adaptiveCorkDelay`/`updateBytesPerSec`): the real 5/10/15ms
+  tiers, with a deliberate deviation for the low-throughput default (see
+  below).
+- **Dual-path urgent/normal concurrency gate** (from
+  `adaptiveLimiter`/priority-reserve), right-sized to a 2-slot semaphore.
+- **Connection warmup** (from `ConnectionWarmerStore`): periodic pings to
+  keep idle links' connections/health current.
+- **Channel-based buffer pooling** (from `getBatchBuf`/`putBatchBuf`, the
+  v1.0.65 fix): not `sync.Pool`, which drops its contents every GC cycle
+  under real load.
+- **Graceful shutdown with peer notification**: TypeClose sent for every
+  open stream before local teardown, instead of the peer discovering a
+  disconnect only via a stall timeout.
+- **Immediate SOCKS-layer rejects** (`socks5/reject.go`): fake-IP/benchmark-
+  range/DNS-over-TLS-probe targets rejected before a wasted dial attempt.
+
+**Deliberately not ported**, with reasons:
+- **Upload-ID pre-reservation pool**: solves a specific Google Drive API
+  shape (`files.generateIds` before `files.create`); Telegram's send calls
+  return their own ID synchronously, no equivalent primitive exists.
+- **`bulkPacerWait`**: confirmed dead/harmful in gdrive itself (a real
+  regression, self-throttling on a signal its own bulk traffic produced) —
+  not ported under any name.
+- **Dedicated per-priority worker pools / per-worker urgent budgets**: no
+  shared worker pool exists to split at vtel's per-link scale; a 2-slot
+  semaphore does the same job.
+- **`fleet.go`'s process-restart supervision**: no separate OS processes
+  here to restart — vtel's "links" are goroutines within one process, not
+  child processes.
+- **Prefetch/pipelining**: gdrive's version decouples upload-confirmation
+  from starting to poll for a response; vtel's poller already runs
+  continuously and independently of the sender from the start, so there's
+  no coupling to decouple.
+- **One deliberate deviation, not an omission**: gdrive's low-throughput
+  batching default is 10ms (a Drive PUT is cheap); vtel keeps a 250ms
+  floor instead, since a Telegram flush is a real rate-limited API call —
+  flushing an idle trickle every 10ms would just queue tiny calls behind
+  the rate limiter for no gain.
+
+## Honest limits
+
+- **Telegram's real ceilings apply**: 50MB `sendDocument`, ~20MB
+  `getFile`/download (batches are split before hitting this), 4096-char
+  text messages.
+- **This will not beat gdrive on raw speed.** A realistic tuned target is
+  roughly **150-250 Mbps aggregate across ~20 bots** — Telegram's Bot API
+  rate limits are the hard ceiling, not vtel's own code. If you need
+  maximum throughput, use gdrive.
+- **The real value of vtel is redundancy**: an independent backup channel
+  on completely different infrastructure (Telegram's API, not Google's),
+  useful when your primary tunnel is blocked/down but Telegram isn't (or
+  vice versa) — not a faster primary path.
+- **Traffic shaping reduces pattern detectability only** (see above), not
+  volume visibility — don't rely on it to hide *that* you're moving data,
+  only to reduce how mechanically regular the moving looks.
+- **What still needs real-network testing**: everything in this repo has
+  been verified against `faketelegram` (an in-memory fake of the Bot API)
+  via `cmd/smoketest` and `cmd/vtel-bench`, plus unit tests per stage — but
+  none of it has run against live bot tokens and the real Telegram network
+  yet. Real-world concerns a fake transport can't surface: actual Bot API
+  rate-limit behavior and 429 frequency under sustained load (the bench
+  harness's 429 counter reads 0 against the fake, by design — see its
+  `-live-config` flag, which is accepted but not yet wired to a working
+  harness), real network latency's effect on the adaptive batching tiers,
+  and whether 20 concurrent bots on one channel trigger any Telegram-side
+  throttling this design doesn't yet account for.
+- **`go test -race` was not run** in the environment this was built in (no
+  C compiler available for cgo, which `-race` requires) — the concurrent
+  flush-dispatch/buffer-pool code introduced in later stages is reasoned
+  about carefully and has passed repeated non-race test/smoketest runs,
+  but has not been race-detector-verified.
 
 ## Disclaimer
 
-This project is for **educational purposes only**. It is intended to demonstrate network tunneling concepts and Telegram Bot API usage. Do not use this software for any illegal or unauthorized activities. The authors are not responsible for any misuse.
+This project is for **educational purposes only**. It is intended to
+demonstrate network tunneling concepts and Telegram Bot API usage. Do not
+use this software for any illegal or unauthorized activities. The authors
+are not responsible for any misuse.

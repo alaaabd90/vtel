@@ -2,3 +2,9 @@
 .venv
 *.session
 teltun
+vtel
+vtel.exe
+vtel-bench
+vtel-bench.exe
+smoketest
+smoketest.exe

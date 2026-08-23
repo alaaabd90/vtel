@@ -1,0 +1,35 @@
+{
+  "_comment": "Example CLIENT config with the spec's default 5 channels x 4 bots = 20 links. JSON has no native comments; this _comment field is ignored by vtel's config parser (unmatched JSON fields are silently ignored) and exists purely for documentation. Most real deployments will want far fewer links - a small handful is already a meaningful independent backup channel; 20 is shown here only to match the scale this format was designed for. Replace every REPLACE_WITH_* placeholder before use: token = this bot's BotFather token, peer_bot_id = the paired server-side bot's numeric user ID (from getMe), channel_id = the shared private channel's chat ID (both bots must be admins of it). See README.md's Setup section for the exact steps.",
+  "mode": "client",
+  "listen": "127.0.0.1:1080",
+  "secret": "REPLACE_WITH_A_LONG_RANDOM_SECRET",
+  "compression_level": "fastest",
+  "reject_ipv6": false,
+  "quiet_hours": null,
+  "links": [
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_0",  "peer_bot_id": 1000000000, "channel_id": -1001000000000 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_1",  "peer_bot_id": 1000000001, "channel_id": -1001000000000 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_2",  "peer_bot_id": 1000000002, "channel_id": -1001000000000 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_3",  "peer_bot_id": 1000000003, "channel_id": -1001000000000 },
+
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_4",  "peer_bot_id": 1000000004, "channel_id": -1001000000001 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_5",  "peer_bot_id": 1000000005, "channel_id": -1001000000001 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_6",  "peer_bot_id": 1000000006, "channel_id": -1001000000001 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_7",  "peer_bot_id": 1000000007, "channel_id": -1001000000001 },
+
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_8",  "peer_bot_id": 1000000008, "channel_id": -1001000000002 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_9",  "peer_bot_id": 1000000009, "channel_id": -1001000000002 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_10", "peer_bot_id": 1000000010, "channel_id": -1001000000002 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_11", "peer_bot_id": 1000000011, "channel_id": -1001000000002 },
+
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_12", "peer_bot_id": 1000000012, "channel_id": -1001000000003 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_13", "peer_bot_id": 1000000013, "channel_id": -1001000000003 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_14", "peer_bot_id": 1000000014, "channel_id": -1001000000003 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_15", "peer_bot_id": 1000000015, "channel_id": -1001000000003 },
+
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_16", "peer_bot_id": 1000000016, "channel_id": -1001000000004 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_17", "peer_bot_id": 1000000017, "channel_id": -1001000000004 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_18", "peer_bot_id": 1000000018, "channel_id": -1001000000004 },
+    { "token": "REPLACE_WITH_CLIENT_BOT_TOKEN_19", "peer_bot_id": 1000000019, "channel_id": -1001000000004 }
+  ]
+}
