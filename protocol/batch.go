@@ -60,6 +60,8 @@ type Batcher struct {
 	enc *zstd.Encoder
 	dec *zstd.Decoder
 
+	// idleTimeout is the floor adaptiveIdleTimeout falls back to under low
+	// throughput; maxFlushDelay is NOT made adaptive (see adaptiveIdleTimeout).
 	idleTimeout        time.Duration
 	maxFlushDelay      time.Duration
 	dataFlushThreshold int
@@ -68,6 +70,13 @@ type Batcher struct {
 	activityCh         chan struct{} // signal queued data so timers can be updated
 	flushCh            chan struct{} // signal immediate flush
 	done               chan struct{}
+
+	// Throughput measurement for adaptiveIdleTimeout, ported from gdrive's
+	// muxLane.updateBytesPerSec/adaptiveCorkDelay: a rolling one-second
+	// window measured at flush time (event-driven, no separate ticker).
+	bytesPerSec    atomic.Int64
+	bytesSinceMeas atomic.Int64
+	lastMeasureNS  atomic.Int64
 }
 
 func NewBatcher(sendFn func(seq uint64, data []byte) error, key []byte, level CompressionLevel) *Batcher {
@@ -188,7 +197,7 @@ func (b *Batcher) flushLoop() {
 			return
 		}
 
-		resetTimer(&idleTimer, &idleCh, time.Until(lastQueuedAt.Add(b.idleTimeout)))
+		resetTimer(&idleTimer, &idleCh, time.Until(lastQueuedAt.Add(b.adaptiveIdleTimeout())))
 		resetTimer(&maxTimer, &maxCh, time.Until(batchStartedAt.Add(b.maxFlushDelay)))
 	}
 
@@ -230,6 +239,7 @@ func (b *Batcher) Flush() {
 	b.lastQueuedAt = time.Time{}
 	b.mu.Unlock()
 
+	b.updateBytesPerSec(int64(len(raw)))
 	b.flushRaw(raw)
 }
 
@@ -240,6 +250,45 @@ func (b *Batcher) batchState() (hasData bool, batchStartedAt, lastQueuedAt time.
 		return false, time.Time{}, time.Time{}
 	}
 	return true, b.batchStartedAt, b.lastQueuedAt
+}
+
+// adaptiveIdleTimeout ports gdrive's muxLane.adaptiveCorkDelay tiers
+// (internal/gdrive/mux.go): under sustained load, a shorter idle debounce
+// keeps latency down; near-idle traffic falls back to idleTimeout instead of
+// gdrive's own 10ms default. Deliberate deviation: a Drive PUT is cheap
+// enough that gdrive can flush an idle trickle every 10ms for free, but a
+// Telegram flush is a real API call gated by RateLimiter's ~400ms-1s
+// interval - flushing that often while idle would just queue tiny calls
+// behind the limiter for no gain. maxFlushDelay and dataFlushThreshold are
+// NOT made adaptive; only the idle timeout is.
+func (b *Batcher) adaptiveIdleTimeout() time.Duration {
+	switch bps := b.bytesPerSec.Load(); {
+	case bps > 10*1024*1024:
+		return 5 * time.Millisecond
+	case bps > 1*1024*1024:
+		return 10 * time.Millisecond
+	case bps > 100*1024:
+		return 15 * time.Millisecond
+	default:
+		return b.idleTimeout
+	}
+}
+
+// updateBytesPerSec is a direct port of gdrive's muxLane.updateBytesPerSec:
+// a rolling one-second measurement window, updated at flush time rather
+// than via a separate ticker goroutine.
+func (b *Batcher) updateBytesPerSec(newBytes int64) {
+	now := time.Now().UnixNano()
+	b.bytesSinceMeas.Add(newBytes)
+	last := b.lastMeasureNS.Load()
+	if interval := now - last; interval >= int64(time.Second) {
+		if b.lastMeasureNS.CompareAndSwap(last, now) {
+			measured := b.bytesSinceMeas.Swap(0)
+			if interval > 0 {
+				b.bytesPerSec.Store(measured * int64(time.Second) / interval)
+			}
+		}
+	}
 }
 
 // flushRaw compresses raw bytes and sends, splitting if compressed size exceeds the limit.

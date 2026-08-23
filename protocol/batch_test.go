@@ -112,6 +112,54 @@ func TestBatcherRoundTripsThroughEnvelopeAndZstd(t *testing.T) {
 	}
 }
 
+func TestAdaptiveIdleTimeoutTierBoundaries(t *testing.T) {
+	t.Parallel()
+
+	b := &Batcher{idleTimeout: 250 * time.Millisecond}
+
+	cases := []struct {
+		bps  int64
+		want time.Duration
+	}{
+		{0, 250 * time.Millisecond},
+		{100 * 1024, 250 * time.Millisecond},      // at the >100KB/s boundary, not above it
+		{100*1024 + 1, 15 * time.Millisecond},     // just above -> 15ms tier
+		{1 * 1024 * 1024, 15 * time.Millisecond},  // at the >1MB/s boundary, not above it
+		{1*1024*1024 + 1, 10 * time.Millisecond},  // just above -> 10ms tier
+		{10 * 1024 * 1024, 10 * time.Millisecond}, // at the >10MB/s boundary, not above it
+		{10*1024*1024 + 1, 5 * time.Millisecond},  // just above -> 5ms tier
+		{100 * 1024 * 1024, 5 * time.Millisecond}, // well above -> still 5ms
+	}
+	for _, c := range cases {
+		b.bytesPerSec.Store(c.bps)
+		if got := b.adaptiveIdleTimeout(); got != c.want {
+			t.Errorf("adaptiveIdleTimeout() at %d B/s = %v, want %v", c.bps, got, c.want)
+		}
+	}
+}
+
+func TestUpdateBytesPerSecMeasuresAfterOneSecondWindow(t *testing.T) {
+	t.Parallel()
+
+	b := &Batcher{}
+	b.lastMeasureNS.Store(time.Now().UnixNano())
+
+	// Within the same window: accumulates but does not yet update bytesPerSec.
+	b.updateBytesPerSec(1024)
+	if got := b.bytesPerSec.Load(); got != 0 {
+		t.Fatalf("bytesPerSec updated mid-window: got %d, want 0", got)
+	}
+
+	// Force the window to have elapsed, then the next call measures.
+	b.lastMeasureNS.Store(time.Now().Add(-2 * time.Second).UnixNano())
+	b.bytesSinceMeas.Store(2 * 1024 * 1024)
+	b.updateBytesPerSec(0)
+
+	if got := b.bytesPerSec.Load(); got <= 0 {
+		t.Fatalf("bytesPerSec after window elapsed = %d, want > 0", got)
+	}
+}
+
 func zstdTestLevel(t *testing.T) CompressionLevel {
 	t.Helper()
 	level, err := ParseCompressionLevel("fastest")
