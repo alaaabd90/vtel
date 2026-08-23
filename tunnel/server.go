@@ -1,10 +1,12 @@
 package tunnel
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
 
+	"github.com/alaaabd90/vtel/pool"
 	"github.com/alaaabd90/vtel/protocol"
 )
 
@@ -12,11 +14,14 @@ import (
 // makes outbound TCP connections.
 type Server struct {
 	links map[int]*linkRuntime
+	pool  *pool.Pool
+
+	warmupCancel context.CancelFunc
 }
 
 func NewServer(specs []LinkSpec) *Server {
 	s := &Server{}
-	s.links, _ = buildPool(specs, s.newServerLink)
+	s.links, s.pool = buildPool(specs, s.newServerLink)
 	return s
 }
 
@@ -29,6 +34,10 @@ func (s *Server) newServerLink(spec LinkSpec) *linkRuntime {
 }
 
 func (s *Server) Run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.warmupCancel = cancel
+	s.pool.RunWarmup(ctx)
+
 	for _, lr := range s.links {
 		go lr.poller.Run()
 		go s.recvLoop(lr)
@@ -88,6 +97,9 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 }
 
 func (s *Server) Stop() {
+	if s.warmupCancel != nil {
+		s.warmupCancel()
+	}
 	for _, lr := range s.links {
 		lr.batcher.Stop()
 		lr.poller.Stop()

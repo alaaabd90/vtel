@@ -1,6 +1,12 @@
 package pool
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func newTestLinks(n int) []*Link {
 	links := make([]*Link, n)
@@ -71,6 +77,66 @@ func TestUnhealthyLinkExcludedThenDegradesGracefully(t *testing.T) {
 	got = p.PickLeastConnExcluding(nil)
 	if got == nil {
 		t.Fatalf("expected graceful degradation to return a link, got nil")
+	}
+}
+
+func TestRunWarmupCallsImmediatelyAndStopsOnCancel(t *testing.T) {
+	l := &Link{ID: 0}
+	var calls atomic.Int64
+	l.WarmFn = func() error {
+		calls.Add(1)
+		return nil
+	}
+	p := NewPool([]*Link{l})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.RunWarmup(ctx)
+
+	deadline := time.Now().Add(1 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("RunWarmup did not call WarmFn immediately")
+	}
+
+	cancel()
+	after := calls.Load()
+	time.Sleep(100 * time.Millisecond)
+	if calls.Load() != after {
+		t.Fatalf("WarmFn kept being called after ctx cancellation: %d -> %d", after, calls.Load())
+	}
+}
+
+func TestRunWarmupSkipsLinksWithoutWarmFn(t *testing.T) {
+	l := &Link{ID: 0} // no WarmFn set
+	p := NewPool([]*Link{l})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.RunWarmup(ctx) // must not panic on a nil WarmFn
+
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestRunWarmupFailureMarksLinkUnhealthy(t *testing.T) {
+	l := &Link{ID: 0}
+	l.WarmFn = func() error { return errors.New("unreachable") }
+	for i := 0; i < UnhealthyThreshold-1; i++ {
+		l.RecordFailure()
+	}
+	p := NewPool([]*Link{l})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.RunWarmup(ctx)
+
+	deadline := time.Now().Add(1 * time.Second)
+	for p.AnyHealthy() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.AnyHealthy() {
+		t.Fatal("expected the link to become unhealthy after a failing WarmFn crossed the threshold")
 	}
 }
 

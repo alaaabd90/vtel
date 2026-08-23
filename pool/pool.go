@@ -6,6 +6,7 @@
 package pool
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 )
@@ -17,12 +18,20 @@ const (
 	// UnhealthyCooldown is how long a link stays excluded from selection
 	// after crossing UnhealthyThreshold.
 	UnhealthyCooldown = 10 * time.Second
+	// WarmupInterval is how often RunWarmup re-probes each link after its
+	// initial immediate call, matching gdrive's ConnectionWarmerStore cadence.
+	WarmupInterval = 90 * time.Second
 )
 
 // Link tracks health and load for one bot/channel pair.
 type Link struct {
 	ID                          int
 	BotID, PeerBotID, ChannelID int64
+
+	// WarmFn, if set, is called periodically by Pool.RunWarmup to keep this
+	// link's underlying connection warm and probe reachability. Optional -
+	// a nil WarmFn is simply skipped.
+	WarmFn func() error
 
 	activeStreams    atomic.Int64
 	consecutiveFails atomic.Int32
@@ -113,4 +122,42 @@ func (p *Pool) pickFrom(exclude map[int]bool, requireHealthy bool) *Link {
 		}
 	}
 	return best
+}
+
+// RunWarmup starts one background goroutine per link that has a WarmFn set:
+// an immediate call, then a call every WarmupInterval, ported from gdrive's
+// ConnectionWarmerStore pattern - important once a pool of N links (Stage 1)
+// all share telegram.sharedTransport, so an idle link's connection doesn't
+// silently drop from the pool between bursts of real traffic. A warmup
+// failure/success also feeds the link's health tracking (RecordFailure/
+// RecordSuccess), so a genuinely unreachable bot gets excluded from
+// selection even before any real stream is attempted on it. Goroutines stop
+// when ctx is done.
+func (p *Pool) RunWarmup(ctx context.Context) {
+	for _, l := range p.links {
+		if l.WarmFn == nil {
+			continue
+		}
+		go func(l *Link) {
+			l.warmOnce()
+			ticker := time.NewTicker(WarmupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					l.warmOnce()
+				}
+			}
+		}(l)
+	}
+}
+
+func (l *Link) warmOnce() {
+	if err := l.WarmFn(); err != nil {
+		l.RecordFailure()
+	} else {
+		l.RecordSuccess()
+	}
 }

@@ -39,6 +39,7 @@ func newLinkRuntime(spec LinkSpec) *linkRuntime {
 			BotID:     spec.BotID,
 			PeerBotID: spec.PeerBotID,
 			ChannelID: spec.ChannelID,
+			WarmFn:    spec.API.WarmConnection,
 		},
 		api:    spec.API,
 		sender: sender,

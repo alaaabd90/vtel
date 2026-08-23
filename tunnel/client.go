@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sync"
@@ -31,6 +32,8 @@ type Client struct {
 	// links' muxes; each mux only signals for conn IDs it generated).
 	pendingMu sync.Mutex
 	pending   map[uint32]chan struct{}
+
+	warmupCancel context.CancelFunc
 }
 
 func NewClient(specs []LinkSpec, listenAddr string) *Client {
@@ -57,6 +60,10 @@ func (c *Client) newClientLink(spec LinkSpec) *linkRuntime {
 }
 
 func (c *Client) Run() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.warmupCancel = cancel
+	c.pool.RunWarmup(ctx)
+
 	for _, lr := range c.links {
 		go lr.poller.Run()
 		go c.recvLoop(lr)
@@ -171,6 +178,9 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 }
 
 func (c *Client) Stop() {
+	if c.warmupCancel != nil {
+		c.warmupCancel()
+	}
 	for _, lr := range c.links {
 		lr.batcher.Stop()
 		lr.poller.Stop()

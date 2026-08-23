@@ -16,6 +16,21 @@ const (
 	MaxSendDocumentSize = 50 * 1024 * 1024 // 50MB Telegram sendDocument limit
 )
 
+// sharedTransport is one *http.Transport shared by every API instance in
+// the process. Every API instance already implicitly shared connection
+// pooling via http.DefaultTransport (no Client.Transport was ever set), but
+// DefaultTransport's MaxIdleConnsPerHost of 2 is far too low once a pool of
+// N bots (Stage 1) all hit the same api.telegram.org host concurrently -
+// that would force most requests to open a fresh TCP+TLS connection instead
+// of reusing an idle one. Raising it per-host, explicitly, is the actual
+// fix; MaxIdleConns/IdleConnTimeout are set generously for the same reason.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        256,
+	MaxIdleConnsPerHost: 128,
+	IdleConnTimeout:     300 * time.Second,
+	TLSHandshakeTimeout: 30 * time.Second,
+}
+
 type API struct {
 	token    string
 	hostBase string // scheme+host only, e.g. "https://api.telegram.org"; overridable for tests
@@ -34,9 +49,18 @@ func NewAPIWithHost(token, hostBase string) *API {
 		token:    token,
 		hostBase: hostBase,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:   120 * time.Second,
+			Transport: sharedTransport,
 		},
 	}
+}
+
+// WarmConnection performs a cheap no-op API call purely to keep this bot's
+// connection in sharedTransport's idle pool warm - and, as a side effect,
+// verify reachability. Called periodically by pool.Pool.RunWarmup.
+func (a *API) WarmConnection() error {
+	_, err := a.GetMe()
+	return err
 }
 
 func (a *API) botURL(method string) string {
