@@ -15,7 +15,21 @@ import (
 
 const (
 	FlushIdleTimeout = 250 * time.Millisecond
-	MaxFlushDelay    = 750 * time.Millisecond
+
+	// MaxFlushDelay was 750ms - a hard cap that made sense when a flush's
+	// own network send was expected to complete in well under a second.
+	// Found via live device testing that it now undermines
+	// controlCoalesceWindow: RateLimiter's minInterval floor (see
+	// telegram/ratelimit.go) is 800ms, so a flush triggered anywhere near
+	// the old 750ms cap still has to queue behind the rate limiter for
+	// roughly that long anyway before it's actually sent - meanwhile any
+	// frame that arrives one tick too late starts a brand new batch that
+	// repeats the same wait. Raised so batches have a real chance to
+	// accumulate for close to a full send-interval's worth of frames
+	// before being forced out, since sending more often than the channel
+	// can actually process just fragments the same traffic into more
+	// rate-limited sends for no benefit.
+	MaxFlushDelay = 1200 * time.Millisecond
 
 	// controlCoalesceWindow bounds how long a CONNECT/CLOSE/RESET frame
 	// waits for siblings before flushing, replacing what used to be an
@@ -25,14 +39,19 @@ const (
 	// CONNECTs (a page load, an app sync hitting several endpoints at once)
 	// each firing its own separate Telegram sendMessage call was enough to
 	// trip Telegram's flood protection far harder than the per-chat rate
-	// limit alone (retry_after climbing into the tens of seconds). A short
-	// coalescing window lets frames arriving within it merge into one send;
-	// a lone control frame still flushes fast enough that the extra delay
-	// is imperceptible for real interactive use. Widened from an initial
-	// 20ms after further live testing: a real burst (a page load, an app
-	// sync) spreads its connections over tens of milliseconds, not one
-	// instant, so 20ms caught less of it than intended.
-	controlCoalesceWindow = 60 * time.Millisecond
+	// limit alone (retry_after climbing into the tens of seconds).
+	//
+	// Widened twice via live testing: first 20ms->60ms since a real burst
+	// spreads over tens of milliseconds, not one instant; then 60ms->900ms
+	// once it became clear the real bottleneck is send RATE, not
+	// per-message latency - the whole link already runs at multi-second
+	// round trips once RateLimiter's minInterval floor (800ms, see
+	// telegram/ratelimit.go) is in the picture, so an extra several hundred
+	// ms of coalescing is imperceptible in that context while directly
+	// cutting how many separate rate-limited sends the same burst costs.
+	// Kept comfortably under MaxFlushDelay so the idle debounce - not the
+	// hard cap - is what triggers the flush in the common case.
+	controlCoalesceWindow = 900 * time.Millisecond
 	DataFlushThreshold    = 32 * 1024        // Flush active streams before they accumulate too much latency.
 	MaxBatchSize          = 48 * 1024 * 1024 // 48MB uncompressed
 	MaxCompressedSize     = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
@@ -525,27 +544,37 @@ func (b *Batcher) adaptiveIdleTimeout() time.Duration {
 	return base
 }
 
+// baseAdaptiveIdleTimeout: under genuinely high measured throughput, always
+// drain fast (the 5/10/15ms tiers) regardless of frame type - continuous
+// data already forces frequent flushes on its own, and MaxFlushDelay's hard
+// cap bounds worst case either way. Only in the low/no-throughput default
+// case does frame type matter: a control-frame batch gets
+// controlCoalesceWindow (long enough to coalesce a connection burst without
+// fragmenting it into more rate-limited sends than necessary - see its doc
+// comment), a pure-DATA batch keeps the shorter idleTimeout floor.
+//
+// Bug found via live testing: this used to be written as
+// min(controlCoalesceWindow, tier), which was correct back when the window
+// was 60ms (shorter than the 250ms default) but silently inverted once the
+// window was widened past that default - min() then always picked the
+// unchanged 250ms default and the wider window was never actually applied.
 func (b *Batcher) baseAdaptiveIdleTimeout() time.Duration {
-	tier := func() time.Duration {
-		switch bps := b.bytesPerSec.Load(); {
-		case bps > 10*1024*1024:
-			return 5 * time.Millisecond
-		case bps > 1*1024*1024:
-			return 10 * time.Millisecond
-		case bps > 100*1024:
-			return 15 * time.Millisecond
-		default:
-			return b.idleTimeout
-		}
-	}()
+	switch bps := b.bytesPerSec.Load(); {
+	case bps > 10*1024*1024:
+		return 5 * time.Millisecond
+	case bps > 1*1024*1024:
+		return 10 * time.Millisecond
+	case bps > 100*1024:
+		return 15 * time.Millisecond
+	}
 
 	b.mu.Lock()
 	hasControl := b.hasControlFrame
 	b.mu.Unlock()
-	if hasControl && controlCoalesceWindow < tier {
+	if hasControl {
 		return controlCoalesceWindow
 	}
-	return tier
+	return b.idleTimeout
 }
 
 // BytesPerSec returns the current throughput measurement (see

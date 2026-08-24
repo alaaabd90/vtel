@@ -187,6 +187,30 @@ func TestAdaptiveIdleTimeoutTierBoundaries(t *testing.T) {
 	}
 }
 
+// TestAdaptiveIdleTimeoutUsesControlCoalesceWindowUnderLowThroughput guards
+// against a real bug found via live testing: baseAdaptiveIdleTimeout used to
+// pick min(controlCoalesceWindow, tier), which was correct while the window
+// was 60ms (shorter than the 250ms low-throughput default) but silently
+// inverted once the window was widened past that default - min() then
+// always picked the unchanged 250ms default, so the wider window meant to
+// stop fragmenting a connection burst into many separate rate-limited sends
+// was never actually applied.
+func TestAdaptiveIdleTimeoutUsesControlCoalesceWindowUnderLowThroughput(t *testing.T) {
+	t.Parallel()
+
+	b := &Batcher{idleTimeout: 250 * time.Millisecond, hasControlFrame: true}
+	if got := b.adaptiveIdleTimeout(); got != controlCoalesceWindow {
+		t.Fatalf("adaptiveIdleTimeout() with hasControlFrame=true at 0 B/s = %v, want controlCoalesceWindow (%v)", got, controlCoalesceWindow)
+	}
+
+	// High measured throughput should still win regardless of frame type -
+	// continuous data already forces frequent flushes on its own.
+	b.bytesPerSec.Store(100 * 1024 * 1024)
+	if got := b.adaptiveIdleTimeout(); got != 5*time.Millisecond {
+		t.Fatalf("adaptiveIdleTimeout() with hasControlFrame=true at high throughput = %v, want 5ms tier", got)
+	}
+}
+
 func TestUpdateBytesPerSecMeasuresAfterOneSecondWindow(t *testing.T) {
 	t.Parallel()
 
