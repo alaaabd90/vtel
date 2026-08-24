@@ -16,6 +16,20 @@ import (
 const (
 	FlushIdleTimeout   = 250 * time.Millisecond
 	MaxFlushDelay      = 750 * time.Millisecond
+
+	// controlCoalesceWindow bounds how long a CONNECT/CLOSE/RESET frame
+	// waits for siblings before flushing, replacing what used to be an
+	// unconditional immediate flush (isControlFrame in Add). Found via live
+	// device testing: a phone routes every background app's own connection
+	// attempts through one SOCKS5 link, so a burst of near-simultaneous
+	// CONNECTs (a page load, an app sync hitting several endpoints at once)
+	// each firing its own separate Telegram sendMessage call was enough to
+	// trip Telegram's flood protection far harder than the per-chat rate
+	// limit alone (retry_after climbing into the tens of seconds). A short
+	// coalescing window lets frames arriving within it merge into one send;
+	// a lone control frame still flushes fast enough that the extra delay
+	// is imperceptible for real interactive use.
+	controlCoalesceWindow = 20 * time.Millisecond
 	DataFlushThreshold = 32 * 1024        // Flush active streams before they accumulate too much latency.
 	MaxBatchSize       = 48 * 1024 * 1024 // 48MB uncompressed
 	MaxCompressedSize  = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
@@ -112,10 +126,11 @@ func ParseCompressionLevel(s string) (CompressionLevel, error) {
 // Batcher collects frames and flushes them as zstd-compressed, AES-256-GCM
 // sealed batches.
 type Batcher struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	hasUrgent bool // whether the in-progress batch contains any urgent frame
-	seqNum    atomic.Uint64
+	mu              sync.Mutex
+	buf             bytes.Buffer
+	hasUrgent       bool // whether the in-progress batch contains any urgent frame
+	hasControlFrame bool // whether the in-progress batch contains a CONNECT/CLOSE/RESET - see controlCoalesceWindow
+	seqNum          atomic.Uint64
 	sendFn    func(seq uint64, data []byte, urgent bool) error
 	key       []byte // AES-256-GCM key from DeriveKey, applied to every flush
 
@@ -297,6 +312,9 @@ func (b *Batcher) Add(f *Frame, urgent bool) bool {
 	if urgent {
 		b.hasUrgent = true
 	}
+	if isControlFrame(f.Type) {
+		b.hasControlFrame = true
+	}
 	b.mu.Unlock()
 
 	shouldFlush := bufLen >= MaxBatchSize
@@ -304,11 +322,15 @@ func (b *Batcher) Add(f *Frame, urgent bool) bool {
 		shouldFlush = true
 	}
 
-	if shouldFlush || isControlFrame(f.Type) {
+	if shouldFlush {
 		b.triggerFlush()
 		return true
 	}
 
+	// Control frames no longer force an immediate flush here - see
+	// controlCoalesceWindow's doc comment. adaptiveIdleTimeout applies that
+	// short window automatically once hasControlFrame is set, via the same
+	// activity-triggered timer path DATA frames already use.
 	b.triggerActivity()
 	return true
 }
@@ -456,6 +478,7 @@ func (b *Batcher) Flush() {
 	b.lastQueuedAt = time.Time{}
 	urgent := b.hasUrgent
 	b.hasUrgent = false
+	b.hasControlFrame = false
 	b.mu.Unlock()
 
 	seq := b.seqNum.Add(1)
@@ -500,16 +523,26 @@ func (b *Batcher) adaptiveIdleTimeout() time.Duration {
 }
 
 func (b *Batcher) baseAdaptiveIdleTimeout() time.Duration {
-	switch bps := b.bytesPerSec.Load(); {
-	case bps > 10*1024*1024:
-		return 5 * time.Millisecond
-	case bps > 1*1024*1024:
-		return 10 * time.Millisecond
-	case bps > 100*1024:
-		return 15 * time.Millisecond
-	default:
-		return b.idleTimeout
+	tier := func() time.Duration {
+		switch bps := b.bytesPerSec.Load(); {
+		case bps > 10*1024*1024:
+			return 5 * time.Millisecond
+		case bps > 1*1024*1024:
+			return 10 * time.Millisecond
+		case bps > 100*1024:
+			return 15 * time.Millisecond
+		default:
+			return b.idleTimeout
+		}
+	}()
+
+	b.mu.Lock()
+	hasControl := b.hasControlFrame
+	b.mu.Unlock()
+	if hasControl && controlCoalesceWindow < tier {
+		return controlCoalesceWindow
 	}
+	return tier
 }
 
 // BytesPerSec returns the current throughput measurement (see

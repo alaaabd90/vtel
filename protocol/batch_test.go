@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,6 +21,54 @@ func TestSendWithRetryDoesNotRetryPermanentErrors(t *testing.T) {
 
 	if calls != 1 {
 		t.Fatalf("sendWithRetry() calls = %d, want 1", calls)
+	}
+}
+
+// TestControlFramesCoalesceWithinShortWindow guards against a real bug
+// found via live device testing: control frames (CONNECT/CLOSE/RESET) used
+// to trigger an unconditional immediate flush, so a burst of near-
+// simultaneous CONNECTs (e.g. several apps' background connection attempts
+// right after a phone's VPN comes up) each became its own separate
+// Telegram send - enough sends in a tight window tripped Telegram's flood
+// protection far harder than the per-chat rate limit alone. Frames added
+// within controlCoalesceWindow of each other must land in one flush.
+func TestControlFramesCoalesceWithinShortWindow(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+
+	var mu sync.Mutex
+	var flushes int
+	sent := make(chan struct{}, 16)
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
+		mu.Lock()
+		flushes++
+		mu.Unlock()
+		sent <- struct{}{}
+		return nil
+	}, key, zstdTestLevel(t), nil)
+	defer b.Stop()
+
+	for i := 0; i < 5; i++ {
+		b.Add(&Frame{Type: TypeConnect, ConnID: uint32(i), Payload: []byte("x")}, true)
+	}
+
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch never flushed")
+	}
+
+	// Give a moment for any (incorrect) extra flushes to land before
+	// asserting there was exactly one.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if flushes != 1 {
+		t.Fatalf("flushes = %d, want 1 - control frames added in quick succession should coalesce into one send", flushes)
 	}
 }
 
