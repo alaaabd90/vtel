@@ -49,8 +49,8 @@ func newLinkRuntime(spec LinkSpec) *linkRuntime {
 	}
 	lr.batcher = protocol.NewBatcher(sender.Send, spec.Key, spec.CompressionLevel, spec.QuietHours)
 	lr.link.ThroughputBytesPerSec = lr.batcher.BytesPerSec
-	lr.mux = NewMux(func(f *protocol.Frame, urgent bool) {
-		lr.batcher.Add(f, urgent)
+	lr.mux = NewMux(func(f *protocol.Frame, urgent bool) bool {
+		return lr.batcher.Add(f, urgent)
 	})
 	return lr
 }

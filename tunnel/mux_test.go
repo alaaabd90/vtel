@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func recvOrTimeout(t *testing.T, ch <-chan []byte, want string) {
 }
 
 func TestDeliverOrderedBuffersOutOfOrderFrames(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame, urgent bool) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool { return true })
 	c := m.RegisterConn(1)
 
 	// Deliver Seq 2, then 1, then 0 - out of order. Only once Seq 0 arrives
@@ -36,7 +37,7 @@ func TestDeliverOrderedBuffersOutOfOrderFrames(t *testing.T) {
 }
 
 func TestDeliverOrderedDropsDuplicateSeq(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame, urgent bool) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool { return true })
 	c := m.RegisterConn(1)
 
 	m.HandleFrame(&protocol.Frame{Type: protocol.TypeData, ConnID: 1, SeqNum: 0, Payload: []byte("A")})
@@ -63,7 +64,7 @@ func TestDeliverOrderedDropsDuplicateSeq(t *testing.T) {
 // returned, so any TypeData racing ahead of a slow dial found no conn in
 // m.conns and was silently discarded.
 func TestRegisterConnBeforeDialBuffersMidDialData(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame, urgent bool) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool { return true })
 
 	// RegisterConn happens first, exactly as Server.handleConnect now does
 	// before calling net.DialTimeout.
@@ -78,15 +79,16 @@ func TestRegisterConnBeforeDialBuffersMidDialData(t *testing.T) {
 }
 
 func TestHandleFrameDataForUnregisteredConnIsDroppedNotPanicking(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame, urgent bool) {})
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool { return true })
 	// No RegisterConn/NewConn call for ID 99 - must be a silent no-op, not a panic.
 	m.HandleFrame(&protocol.Frame{Type: protocol.TypeData, ConnID: 99, SeqNum: 0, Payload: []byte("dropped")})
 }
 
 func TestSendDataStampsIncrementingSeq(t *testing.T) {
 	var got []*protocol.Frame
-	m := NewMux(func(f *protocol.Frame, urgent bool) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
 		got = append(got, f)
+		return true
 	})
 	c := m.NewConn()
 
@@ -103,8 +105,9 @@ func TestSendDataStampsIncrementingSeq(t *testing.T) {
 
 func TestSendDataClassifiesUrgencyViaPriorityLatch(t *testing.T) {
 	var urgencies []bool
-	m := NewMux(func(f *protocol.Frame, urgent bool) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
 		urgencies = append(urgencies, urgent)
+		return true
 	})
 	c := m.NewConn()
 
@@ -132,8 +135,9 @@ func TestSendDataClassifiesUrgencyViaPriorityLatch(t *testing.T) {
 
 func TestControlFramesAreAlwaysUrgent(t *testing.T) {
 	var urgencies []bool
-	m := NewMux(func(f *protocol.Frame, urgent bool) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
 		urgencies = append(urgencies, urgent)
+		return true
 	})
 	c := m.NewConn()
 
@@ -158,13 +162,14 @@ func TestControlFramesAreAlwaysUrgent(t *testing.T) {
 func TestCloseAllNotifySendsCloseForEveryOpenConn(t *testing.T) {
 	var notified []uint32
 	var mu sync.Mutex
-	m := NewMux(func(f *protocol.Frame, urgent bool) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
 		if f.Type != protocol.TypeClose {
-			return
+			return true
 		}
 		mu.Lock()
 		notified = append(notified, f.ConnID)
 		mu.Unlock()
+		return true
 	})
 
 	c1 := m.NewConn()
@@ -198,15 +203,51 @@ func TestCloseAllNotifySendsCloseForEveryOpenConn(t *testing.T) {
 }
 
 func TestCloseAllNotifyOnEmptyMuxIsNoop(t *testing.T) {
-	m := NewMux(func(f *protocol.Frame, urgent bool) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
 		t.Fatal("sendFrame should not be called with no open conns")
+		return true
 	})
 	m.CloseAllNotify()
 }
 
+// TestRelayTearsDownStreamWhenSendDataBackpressureFails proves Relay reacts
+// correctly to a SendData admission failure (see protocol.Batcher.Add's
+// bool return / maxQueuedAndInFlightBytes): rather than silently dropping
+// the frame and leaving a permanent gap in the stream's Seq order, it must
+// tear the one connection down (matching how a real read/write error is
+// already handled).
+func TestRelayTearsDownStreamWhenSendDataBackpressureFails(t *testing.T) {
+	m := NewMux(func(f *protocol.Frame, urgent bool) bool {
+		return f.Type != protocol.TypeData // simulate a permanently full admission budget for data
+	})
+
+	localSide, remoteSide := net.Pipe()
+	tc := m.NewConn()
+
+	done := make(chan struct{})
+	go func() {
+		m.Relay(remoteSide, tc)
+		close(done)
+	}()
+
+	go func() {
+		localSide.Write([]byte("hello"))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Relay did not return after a SendData backpressure failure")
+	}
+
+	if !tc.IsClosed() {
+		t.Error("tunnel Conn was not closed after a SendData backpressure failure")
+	}
+}
+
 func TestTypeCloseAndTypeResetBothCloseConn(t *testing.T) {
 	for _, typ := range []byte{protocol.TypeClose, protocol.TypeReset} {
-		m := NewMux(func(f *protocol.Frame, urgent bool) {})
+		m := NewMux(func(f *protocol.Frame, urgent bool) bool { return true })
 		c := m.RegisterConn(1)
 
 		m.HandleFrame(&protocol.Frame{Type: typ, ConnID: 1})

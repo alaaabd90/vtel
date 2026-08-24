@@ -45,7 +45,45 @@ const (
 	// (possibly still-retrying) send to complete before giving up and
 	// closing the encoder anyway.
 	shutdownFlushTimeout = 10 * time.Second
+
+	// maxQueuedAndInFlightBytes bounds the combined total of this Batcher's
+	// not-yet-flushed buffer plus every byte handed off to a still-running
+	// flushRaw goroutine (compressing/sealing/sending, possibly mid-retry).
+	// Ported from a confirmed production bug in gdrive
+	// (normalLaneBudgetBytes, internal/gdrive/mux.go): before that fix,
+	// bytes were "released" from accounting the instant a batch was
+	// dequeued for upload, even though the payload stays alive in memory
+	// for the whole compress+seal+upload(+retries) lifecycle - heap
+	// profiled to reach multiple GB for one busy, fast-producing account.
+	// Stage 5 made vtel structurally more exposed to the same failure
+	// shape than gdrive's original bug, not less: Flush dispatches each
+	// batch's compress+seal+send on its own goroutine, so a link whose
+	// real send throughput can't keep up has nothing stopping an unbounded
+	// number of these from piling up, each holding its own up-to-
+	// MaxBatchSize buffer live in memory while blocked on acquireSlot.
+	//
+	// Set generously relative to a single batch and the 2-slot concurrency
+	// gate's realistic working set: gdrive's own history shows this exact
+	// class of bound got mistuned too tight at least once (v1.0.33/34,
+	// "restore upload queue depth 8->16 frames to unblock producer") and
+	// had to be loosened to stop throttling legitimate throughput. Tune
+	// upward, not down, if this ever proves too eager in practice.
+	maxQueuedAndInFlightBytes = 4 * MaxBatchSize // 192MB
+
+	// admitPollInterval bounds how often Add polls for budget to free up.
+	admitPollInterval = 10 * time.Millisecond
 )
+
+// admitTimeout caps how long a single Add call can block waiting for room
+// in the combined queued+in-flight budget (see maxQueuedAndInFlightBytes).
+// Polling (rather than a channel-based wait) keeps this simple and mirrors
+// gdrive's own polling approach to the same problem. On timeout, Add
+// reports failure to its caller (see the bool return) so the caller can
+// tear the one stuck stream down, rather than either blocking forever or
+// silently dropping a frame that would otherwise leave a permanent gap in
+// that connection's Seq-ordered stream. A var, not a const, purely so
+// tests can shrink it instead of waiting out the real 20s.
+var admitTimeout = 20 * time.Second
 
 // CompressionLevel is a zstd encoder level, re-exported so callers outside
 // this package don't need to import klauspost/compress/zstd directly.
@@ -124,6 +162,12 @@ type Batcher struct {
 
 	// bufPoolCh caches reusable plaintext batch buffers - see getBuf/putBuf.
 	bufPoolCh chan *[]byte
+
+	// inFlightBytes tracks bytes handed off to a still-running flushRaw
+	// goroutine (not yet fully sent). Combined with the current buf.Len()
+	// (the queued-but-not-flushed portion), this is the budget admitBytes
+	// enforces - see maxQueuedAndInFlightBytes.
+	inFlightBytes atomic.Int64
 }
 
 func NewBatcher(sendFn func(seq uint64, data []byte, urgent bool) error, key []byte, level CompressionLevel, quietHours *QuietHoursConfig) *Batcher {
@@ -220,8 +264,21 @@ func (b *Batcher) acquireSlot(urgent bool) func() {
 // be eligible for the reserved concurrency slot at send time (see acquireSlot) -
 // callers classify control frames as always urgent and TypeData frames via
 // each stream's one-way priority latch (see tunnel.Conn).
-func (b *Batcher) Add(f *Frame, urgent bool) {
+//
+// Add blocks (bounded by admitTimeout) until there is room in the combined
+// queued+in-flight byte budget (see maxQueuedAndInFlightBytes), and reports
+// false if that timeout is reached without the frame being admitted - the
+// caller (Mux.SendData) is responsible for tearing down that one stream
+// rather than leaving a silent gap in its Seq-ordered stream.
+func (b *Batcher) Add(f *Frame, urgent bool) bool {
 	data := f.Marshal()
+
+	if !b.admitBytes(len(data)) {
+		fmt.Printf("[batcher] Add: admission timed out after %v (budget full), rejecting frame type=0x%02x connID=%08x\n",
+			admitTimeout, f.Type, f.ConnID)
+		return false
+	}
+
 	now := time.Now()
 
 	b.mu.Lock()
@@ -247,10 +304,30 @@ func (b *Batcher) Add(f *Frame, urgent bool) {
 
 	if shouldFlush || isControlFrame(f.Type) {
 		b.triggerFlush()
-		return
+		return true
 	}
 
 	b.triggerActivity()
+	return true
+}
+
+// admitBytes blocks (polling every admitPollInterval) until there is room
+// for n more bytes in the combined queued+in-flight budget, or admitTimeout
+// elapses. Returns false on timeout.
+func (b *Batcher) admitBytes(n int) bool {
+	deadline := time.Now().Add(admitTimeout)
+	for {
+		b.mu.Lock()
+		queued := int64(b.buf.Len())
+		b.mu.Unlock()
+		if queued+b.inFlightBytes.Load()+int64(n) <= maxQueuedAndInFlightBytes {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(admitPollInterval)
+	}
 }
 
 func (b *Batcher) triggerFlush() {
@@ -381,11 +458,13 @@ func (b *Batcher) Flush() {
 
 	seq := b.seqNum.Add(1)
 	b.updateBytesPerSec(int64(len(raw)))
+	b.inFlightBytes.Add(int64(len(raw)))
 	b.flushWG.Add(1)
 	go func() {
 		defer b.flushWG.Done()
 		b.flushRaw(seq, raw, urgent)
 		b.putBuf(bufPtr)
+		b.inFlightBytes.Add(-int64(len(raw)))
 	}()
 }
 

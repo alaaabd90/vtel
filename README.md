@@ -192,6 +192,23 @@ vtel's much smaller scale (5-20 bots, not Drive-account-scale parallelism).
   tiebreak was wrong, but because it got bundled with heavier adaptive
   bandwidth-cap/burst-controller machinery that caused real regressions;
   none of that extra machinery is ported here.
+- **Queued+in-flight byte budget (backpressure)** (`protocol/batch.go`, from
+  `normalLaneBudgetBytes` in `internal/gdrive/mux.go`): a confirmed
+  production bug in gdrive — batch bytes were released from accounting the
+  instant they were dequeued for upload, even though the payload stays
+  alive in memory for the whole compress+seal+upload(+retries) lifecycle,
+  heap-profiled to reach multiple GB for one busy account. `Batcher.Add`
+  now blocks (bounded, polling) until `maxQueuedAndInFlightBytes` has room,
+  and reports failure to its caller on timeout rather than either blocking
+  forever or silently dropping a frame — `Mux.Relay` treats that failure
+  the same as a real read/write error and tears the one stuck stream down.
+  Stage 5's async per-flush goroutine dispatch made vtel structurally more
+  exposed to this failure shape than gdrive's original bug, not less, so
+  this was worth doing proactively rather than waiting to hit it under
+  real load. One caution carried over from gdrive's own history: this
+  exact class of bound got mistuned too tight at least once there
+  (v1.0.33/34) and had to be loosened — the budget here (192MB) is set
+  generously for the same reason.
 
 **Deliberately not ported**, with reasons:
 - **Upload-ID pre-reservation pool**: solves a specific Google Drive API

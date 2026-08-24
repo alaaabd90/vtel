@@ -160,6 +160,112 @@ func TestUpdateBytesPerSecMeasuresAfterOneSecondWindow(t *testing.T) {
 	}
 }
 
+func TestAdmitBytesSucceedsUnderBudget(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
+	defer b.Stop()
+
+	if !b.admitBytes(1024) {
+		t.Fatal("admitBytes(1024) = false under an empty budget, want true")
+	}
+}
+
+func TestAdmitBytesBlocksThenSucceedsOnceBudgetFrees(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
+	defer b.Stop()
+
+	// Fill the budget so the next admitBytes call must block.
+	b.inFlightBytes.Store(maxQueuedAndInFlightBytes)
+
+	freedAt := make(chan time.Time, 1)
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		b.inFlightBytes.Store(0)
+		freedAt <- time.Now()
+	}()
+
+	start := time.Now()
+	if !b.admitBytes(1024) {
+		t.Fatal("admitBytes(1024) = false, want true once budget freed")
+	}
+	admitted := time.Now()
+
+	select {
+	case freed := <-freedAt:
+		if admitted.Before(freed) {
+			t.Fatalf("admitBytes returned before the budget actually freed (admitted %v before free %v)", admitted.Sub(start), freed.Sub(start))
+		}
+	default:
+		t.Fatal("admitBytes returned before the freeing goroutine ran at all")
+	}
+}
+
+func TestAddReturnsFalseOnAdmissionTimeout(t *testing.T) {
+	// Mutates the package-level admitTimeout var - must not run in parallel
+	// with other tests that call Add/admitBytes.
+	orig := admitTimeout
+	admitTimeout = 30 * time.Millisecond
+	defer func() { admitTimeout = orig }()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error { return nil }, key, zstdTestLevel(t), nil)
+	defer b.Stop()
+
+	b.inFlightBytes.Store(maxQueuedAndInFlightBytes) // never freed in this test
+
+	got := b.Add(&Frame{Type: TypeData, ConnID: 1, Payload: []byte("x")}, false)
+	if got {
+		t.Fatal("Add() = true with the budget permanently full, want false (admission timeout)")
+	}
+}
+
+func TestFlushTracksInFlightBytesAndReleasesOnCompletion(t *testing.T) {
+	t.Parallel()
+
+	key, err := DeriveKey("test-secret")
+	if err != nil {
+		t.Fatalf("DeriveKey: %v", err)
+	}
+
+	release := make(chan struct{})
+	sent := make(chan struct{})
+	b := NewBatcher(func(seq uint64, data []byte, urgent bool) error {
+		close(sent)
+		<-release // hold the flushRaw goroutine open until the test says go
+		return nil
+	}, key, zstdTestLevel(t), nil)
+	defer func() {
+		close(release)
+		b.Stop()
+	}()
+
+	b.Add(&Frame{Type: TypeConnect, ConnID: 1, Payload: []byte("connect payload")}, true)
+
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch never reached sendFn")
+	}
+
+	if b.inFlightBytes.Load() <= 0 {
+		t.Fatal("inFlightBytes = 0 while a flushRaw goroutine is still blocked in sendFn, want > 0")
+	}
+}
+
 func TestGetBufPutBufReusesCapacity(t *testing.T) {
 	t.Parallel()
 

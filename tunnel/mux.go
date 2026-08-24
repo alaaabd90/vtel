@@ -89,7 +89,9 @@ type Mux struct {
 
 	// sendFrame is called to send a frame through the tunnel. urgent is
 	// this frame's priority classification, forwarded to Batcher.Add.
-	sendFrame func(f *protocol.Frame, urgent bool)
+	// Returns false if Batcher.Add's admission budget timed out (see
+	// protocol.maxQueuedAndInFlightBytes) - the frame was NOT queued.
+	sendFrame func(f *protocol.Frame, urgent bool) bool
 
 	// onConnect is called when a CONNECT frame is received (server-side)
 	onConnect func(connID uint32, payload *protocol.ConnectPayload)
@@ -100,7 +102,7 @@ type Mux struct {
 	done chan struct{}
 }
 
-func NewMux(sendFrame func(f *protocol.Frame, urgent bool)) *Mux {
+func NewMux(sendFrame func(f *protocol.Frame, urgent bool) bool) *Mux {
 	m := &Mux{
 		conns:     make(map[uint32]*Conn),
 		sendFrame: sendFrame,
@@ -248,7 +250,12 @@ func (m *Mux) deliverOrdered(c *Conn, seq uint32, payload []byte) {
 // SendData sends a DATA frame for a connection, stamped with that
 // connection's next sequence number and classified urgent/normal via the
 // connection's one-way priority latch (see Conn.classifyDataUrgency).
-func (m *Mux) SendData(connID uint32, data []byte) {
+// Returns false if the batcher's admission budget timed out - see
+// sendFrame's doc comment. Callers must treat a false return as a
+// terminal failure for this connection (see Relay), since a dropped
+// TypeData frame would otherwise leave a permanent gap in that
+// connection's Seq-ordered stream that the peer can never fill.
+func (m *Mux) SendData(connID uint32, data []byte) bool {
 	c := m.GetConn(connID)
 	var seq uint32
 	urgent := false
@@ -256,7 +263,7 @@ func (m *Mux) SendData(connID uint32, data []byte) {
 		seq = c.nextSendSeq()
 		urgent = c.classifyDataUrgency(len(data))
 	}
-	m.sendFrame(&protocol.Frame{
+	return m.sendFrame(&protocol.Frame{
 		Type:    protocol.TypeData,
 		ConnID:  connID,
 		SeqNum:  seq,
@@ -266,8 +273,10 @@ func (m *Mux) SendData(connID uint32, data []byte) {
 
 // SendClose sends a graceful CLOSE frame (peer should finish delivering
 // already-buffered data before tearing the connection down). Always urgent.
-func (m *Mux) SendClose(connID uint32) {
-	m.sendFrame(&protocol.Frame{
+// Best-effort: callers tearing a connection down should proceed with local
+// cleanup regardless of the return value.
+func (m *Mux) SendClose(connID uint32) bool {
+	return m.sendFrame(&protocol.Frame{
 		Type:   protocol.TypeClose,
 		ConnID: connID,
 	}, true)
@@ -275,9 +284,10 @@ func (m *Mux) SendClose(connID uint32) {
 
 // SendReset sends a hard-abort RESET frame, distinct from the graceful
 // SendClose - used where there is nothing left worth delivering (e.g. a
-// dial failure with no data ever sent). Always urgent.
-func (m *Mux) SendReset(connID uint32) {
-	m.sendFrame(&protocol.Frame{
+// dial failure with no data ever sent). Always urgent. Best-effort, same as
+// SendClose.
+func (m *Mux) SendReset(connID uint32) bool {
+	return m.sendFrame(&protocol.Frame{
 		Type:   protocol.TypeReset,
 		ConnID: connID,
 	}, true)
@@ -347,7 +357,18 @@ func (m *Mux) Relay(netConn net.Conn, tunnelConn *Conn) {
 			if n > 0 {
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				m.SendData(tunnelConn.ID, data)
+				if !m.SendData(tunnelConn.ID, data) {
+					// Admission budget timed out (see protocol.
+					// maxQueuedAndInFlightBytes): this link can't keep up.
+					// Tear this one stream down rather than silently
+					// dropping a frame, which would leave a permanent gap
+					// the peer's Seq ordering can never fill.
+					fmt.Printf("[mux] conn %08x: batcher backpressure timeout, closing\n", tunnelConn.ID)
+					m.SendReset(tunnelConn.ID) // best-effort; may also fail to admit
+					m.RemoveConn(tunnelConn.ID)
+					netConn.Close()
+					return
+				}
 				tunnelConn.MarkUsed()
 			}
 			if err != nil {
