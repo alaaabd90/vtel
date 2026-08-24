@@ -23,6 +23,35 @@ links behaves like N independent lanes: a stream picks one link for its
 whole lifetime, and the pool automatically avoids/retries around links that
 are failing or stalled.
 
+## Quick install (VPS)
+
+```
+curl -sL https://raw.githubusercontent.com/alaaabd90/vtel/main/scripts/install.sh | bash
+```
+
+Installs the `vtel` binary + CLI manager, and sets up the **server** role by
+default (the side with internet access — matching gdrive's own installer,
+which sets up its exit-node role the same way; this is what you'd typically
+put on a VPS). To install the **client** role instead:
+
+```
+curl -sL https://raw.githubusercontent.com/alaaabd90/vtel/main/scripts/install.sh | VTEL_MODE=client bash
+```
+
+vtel can't provision bot links itself — each one needs a real token from
+[@BotFather](https://t.me/BotFather) — so a fresh install writes an empty
+config skeleton with a random secret and tells you to add at least one link
+before the systemd service has anything to do:
+
+```
+vtel links add      # prompts for token / peer_bot_id / channel_id
+vtel install         # creates and starts the systemd service
+```
+
+Run `vtel` with no arguments for the interactive manager (status, restart,
+logs, link management, settings, update, rollback, uninstall) — see
+"CLI reference" below for every subcommand.
+
 ## Setup
 
 For each link you want in the pool:
@@ -113,6 +142,37 @@ curl -x socks5h://127.0.0.1:1080 https://ipv4.ident.me
 | `reject_ipv6` | Client only: immediately reject IPv6 literal SOCKS targets | `false` |
 | `quiet_hours` | `{start_hour, end_hour, timezone}` — widens the flush cadence during this daily window instead of pausing (see Traffic shaping below) | disabled |
 | `links` | Array of `{token, peer_bot_id, channel_id}` | required, ≥1 |
+
+## CLI reference
+
+`vtel` doubles as both the running tunnel process (`vtel -config <path>`,
+what systemd's `ExecStart` invokes) and a management CLI, the same
+dual-purpose pattern as gdrive's own binary. Every CLI subcommand reads/
+writes `/root/vtel/config.json` by default (override with the `VTEL_CONFIG`
+env var) and manages a systemd unit named `vtel`.
+
+| Command | Description |
+|---|---|
+| `vtel` | interactive menu |
+| `vtel status` | service state + config summary |
+| `vtel restart` | restart the systemd service |
+| `vtel logs` | follow live journal (`journalctl -u vtel -f`) |
+| `vtel links` / `links add` / `links remove <N>` | list/add/remove bot links |
+| `vtel config` / `config --reveal-secret` | show current config (secret redacted by default) |
+| `vtel export [file]` | print (or write) the full config JSON |
+| `vtel update` | download and install the latest GitHub release |
+| `vtel rollback <tag>` | install a specific previous release (no arg lists available tags) |
+| `vtel install` | (re)create and start the systemd service from the current config |
+| `vtel uninstall [--force]` | permanently remove vtel: service, config, binary |
+
+Unlike gdrive, there's no "restart single account" / per-account service
+equivalent: vtel's links all run as goroutines inside one process (client
+or server, per `mode`), not as separate OS processes, so there's only ever
+one service to restart. There's also no "Google IP" / SNI / DNS-routing /
+account-proxy equivalents — those are Drive/Google-specific concepts with
+no counterpart in vtel's architecture, so the menu doesn't fabricate
+matching items for them; see "What's ported from gdrive" above for what
+*does* carry over.
 
 ## Security
 
