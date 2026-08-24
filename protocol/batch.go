@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	FlushIdleTimeout   = 250 * time.Millisecond
-	MaxFlushDelay      = 750 * time.Millisecond
+	FlushIdleTimeout = 250 * time.Millisecond
+	MaxFlushDelay    = 750 * time.Millisecond
 
 	// controlCoalesceWindow bounds how long a CONNECT/CLOSE/RESET frame
 	// waits for siblings before flushing, replacing what used to be an
@@ -28,11 +28,14 @@ const (
 	// limit alone (retry_after climbing into the tens of seconds). A short
 	// coalescing window lets frames arriving within it merge into one send;
 	// a lone control frame still flushes fast enough that the extra delay
-	// is imperceptible for real interactive use.
-	controlCoalesceWindow = 20 * time.Millisecond
-	DataFlushThreshold = 32 * 1024        // Flush active streams before they accumulate too much latency.
-	MaxBatchSize       = 48 * 1024 * 1024 // 48MB uncompressed
-	MaxCompressedSize  = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
+	// is imperceptible for real interactive use. Widened from an initial
+	// 20ms after further live testing: a real burst (a page load, an app
+	// sync) spreads its connections over tens of milliseconds, not one
+	// instant, so 20ms caught less of it than intended.
+	controlCoalesceWindow = 60 * time.Millisecond
+	DataFlushThreshold    = 32 * 1024        // Flush active streams before they accumulate too much latency.
+	MaxBatchSize          = 48 * 1024 * 1024 // 48MB uncompressed
+	MaxCompressedSize     = 19 * 1024 * 1024 // 19MB compressed (Telegram getFile limit is 20MB)
 
 	maxSendRetries      = 5
 	initialRetryBackoff = 1 * time.Second
@@ -131,8 +134,8 @@ type Batcher struct {
 	hasUrgent       bool // whether the in-progress batch contains any urgent frame
 	hasControlFrame bool // whether the in-progress batch contains a CONNECT/CLOSE/RESET - see controlCoalesceWindow
 	seqNum          atomic.Uint64
-	sendFn    func(seq uint64, data []byte, urgent bool) error
-	key       []byte // AES-256-GCM key from DeriveKey, applied to every flush
+	sendFn          func(seq uint64, data []byte, urgent bool) error
+	key             []byte // AES-256-GCM key from DeriveKey, applied to every flush
 
 	// urgentTok/sharedTok are a 2-slot concurrency gate ported from gdrive's
 	// urgent/normal priority-reserve concept (internal/gdrive/tunnel.go),

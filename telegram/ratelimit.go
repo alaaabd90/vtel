@@ -9,10 +9,22 @@ import (
 
 const (
 	initialInterval = 1 * time.Second
-	minInterval     = 400 * time.Millisecond
-	maxInterval     = 30 * time.Second
-	decreaseStep    = 50 * time.Millisecond
-	burstCapacity   = 3.0
+	// minInterval was 400ms (2.5 sends/sec per bot). Found via live testing
+	// that this was the actual root cause behind the worst failures: a link
+	// has TWO bots (client + server) both sending to the SAME Telegram chat,
+	// each pacing itself independently against its own budget with no
+	// awareness of the other's traffic - so the chat's combined rate could
+	// spike to ~5/sec at the old floor, which is enough to trip Telegram's
+	// per-chat flood protection hard (observed retry_after climbing to
+	// 35-36s, effectively silencing the link for that whole window). Raised
+	// so the combined two-bot rate comfortably stays under what a chat can
+	// actually sustain - trading some steady-state throughput for never
+	// approaching the limit that causes those catastrophic multi-second
+	// stalls in the first place.
+	minInterval   = 800 * time.Millisecond
+	maxInterval   = 30 * time.Second
+	decreaseStep  = 50 * time.Millisecond
+	burstCapacity = 2.0
 )
 
 // RateLimiter implements an adaptive token bucket for Telegram API calls.
