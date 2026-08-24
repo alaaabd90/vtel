@@ -3,6 +3,8 @@ package telegram
 import (
 	"sync"
 	"time"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -60,17 +62,34 @@ func (rl *RateLimiter) Wait() {
 	}
 }
 
-// RecordSend marks a successful send and slowly decreases the interval.
+// RecordSend marks a successful send and decreases the interval - by a
+// share of how far it currently sits above minInterval, not a flat step.
+// A flat step made recovery drastically slower than escalation: a single
+// 429 multiplies interval by 1.5x (RecordRetryAfter), but a handful of
+// hits under real load (e.g. two bots sharing one channel, each blind to
+// the other's traffic against Telegram's per-chat limit) can chain that
+// into several multiplications in quick succession - undoing just one of
+// those from a ~1s interval took over a hundred successful sends at a flat
+// 50ms/send, leaving every send stuck at several seconds long after the
+// actual rate-limiting had passed. Proportional recovery scales with how
+// escalated the interval currently is, so it comes back down roughly as
+// fast as it went up; decreaseStep still sets a floor so recovery never
+// stalls once interval is close to minInterval.
 func (rl *RateLimiter) RecordSend() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	rl.refill(time.Now())
 
-	rl.interval -= rl.decreaseStep
+	step := (rl.interval - rl.minInterval) / 10
+	if step < rl.decreaseStep {
+		step = rl.decreaseStep
+	}
+	rl.interval -= step
 	if rl.interval < rl.minInterval {
 		rl.interval = rl.minInterval
 	}
+	vtellog.Debugf("[ratelimit] send ok, interval now %v", rl.interval)
 }
 
 // RecordRetryAfter increases the interval on a 429 response.
@@ -88,6 +107,7 @@ func (rl *RateLimiter) RecordRetryAfter(retryAfter int) {
 	}
 	rl.tokens = 0
 	rl.lastRefill = time.Now()
+	vtellog.Debugf("[ratelimit] 429 (retry_after=%ds), interval now %v", retryAfter, rl.interval)
 }
 
 func (rl *RateLimiter) refill(now time.Time) {
