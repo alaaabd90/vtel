@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -61,10 +63,12 @@ func NewSender(api *API, botID int64, channelID int64) *Sender {
 func (s *Sender) Send(seq uint64, data []byte, urgent bool) error {
 	if fitsTextBatch(s.botID, seq, data) {
 		text := formatTextBatch(s.botID, seq, data)
+		vtellog.Debugf("[sender] bot %d: seq=%d as text message (%d bytes)", s.botID, seq, len(data))
 		return s.sendRetry(seq, func() (int, error) {
 			return s.api.SendMessage(s.channelID, text)
 		})
 	}
+	vtellog.Debugf("[sender] bot %d: seq=%d as document (%d bytes)", s.botID, seq, len(data))
 	return s.sendRetry(seq, func() (int, error) {
 		return s.api.SendDocument(s.channelID, rotatingFilename(s.botID, seq), data)
 	})

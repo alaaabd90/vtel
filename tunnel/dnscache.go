@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -44,12 +46,16 @@ func (c *dnsCache) resolve(ctx context.Context, host string) ([]string, bool) {
 	c.mu.Unlock()
 	if ok && now.Before(entry.expires) {
 		if entry.neg {
+			vtellog.Debugf("[dns] cache hit (negative) host=%s", host)
 			return nil, false
 		}
+		vtellog.Debugf("[dns] cache hit host=%s addrs=%v", host, entry.addrs)
 		return entry.addrs, true
 	}
 
+	lookupStart := time.Now()
 	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	vtellog.Debugf("[dns] cache miss, resolved host=%s addrs=%v err=%v in %v", host, addrs, err, time.Since(lookupStart))
 	now = time.Now()
 	c.mu.Lock()
 	if len(c.entries) >= dnsCacheMaxEntries {

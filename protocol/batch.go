@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -459,6 +461,7 @@ func (b *Batcher) Flush() {
 	seq := b.seqNum.Add(1)
 	b.updateBytesPerSec(int64(len(raw)))
 	b.inFlightBytes.Add(int64(len(raw)))
+	vtellog.Debugf("[batcher] flush seq=%d raw=%d bytes urgent=%v", seq, len(raw), urgent)
 	b.flushWG.Add(1)
 	go func() {
 		defer b.flushWG.Done()
@@ -569,8 +572,10 @@ func (b *Batcher) sendWithRetry(seq uint64, compressed []byte, urgent bool) {
 	backoff := initialRetryBackoff
 
 	for attempt := 0; attempt <= maxSendRetries; attempt++ {
+		sendStart := time.Now()
 		err := b.sendFn(seq, compressed, urgent)
 		if err == nil {
+			vtellog.Debugf("[batcher] sent seq=%d compressed=%d bytes in %v (attempt %d)", seq, len(compressed), time.Since(sendStart), attempt+1)
 			return
 		}
 		if isPermanentError(err) {

@@ -32,6 +32,7 @@ func cmdConfigShow(args []string) error {
 	fmt.Printf("  Secret:            %s\n", secret)
 	fmt.Printf("  Compression level: %s\n", nonEmpty(cfg.CompressionLevel, "fastest"))
 	fmt.Printf("  Reject IPv6:       %v\n", cfg.RejectIPv6)
+	fmt.Printf("  Debug logging:     %v\n", cfg.Debug)
 	if cfg.QuietHours != nil {
 		fmt.Printf("  Quiet hours:       %02d:00-%02d:00 (%s)\n",
 			cfg.QuietHours.StartHour, cfg.QuietHours.EndHour, nonEmpty(cfg.QuietHours.Timezone, "UTC"))
@@ -72,6 +73,7 @@ func settingsMenu(reader *bufio.Reader) {
 	fmt.Println("  c) Toggle reject_ipv6")
 	fmt.Println("  d) Set/clear quiet hours")
 	fmt.Println("  e) Change SOCKS5 listen address (client mode)")
+	fmt.Println("  f) Toggle debug logging (verbose [debug] tracing, see: vtel logs)")
 	fmt.Print("Choice: ")
 	ch, _ := reader.ReadString('\n')
 
@@ -125,6 +127,9 @@ func settingsMenu(reader *bufio.Reader) {
 		fmt.Print("  New listen address: ")
 		v, _ := reader.ReadString('\n')
 		cfg.Listen = strings.TrimSpace(v)
+	case "f":
+		cfg.Debug = !cfg.Debug
+		fmt.Printf("  debug is now %v\n", cfg.Debug)
 	default:
 		return
 	}

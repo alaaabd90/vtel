@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alaaabd90/vtel/protocol"
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // maxRecvPending bounds a Conn's out-of-order buffer (a safety valve against
@@ -38,6 +39,17 @@ type Conn struct {
 	// classifyDataUrgency.
 	prioritySent    atomic.Uint64
 	priorityDemoted atomic.Bool
+}
+
+func frameTypeName(t byte) string {
+	switch t {
+	case protocol.TypeClose:
+		return "CLOSE"
+	case protocol.TypeReset:
+		return "RESET"
+	default:
+		return fmt.Sprintf("0x%02x", t)
+	}
 }
 
 // nextSendSeq returns this Conn's next outbound TypeData sequence number.
@@ -126,6 +138,7 @@ func (m *Mux) NewConn() *Conn {
 	}
 	c := newConn(id)
 	m.conns[id] = c
+	vtellog.Debugf("[mux] new conn %08x (client-initiated)", id)
 	return c
 }
 
@@ -138,6 +151,7 @@ func (m *Mux) RegisterConn(id uint32) *Conn {
 	defer m.mu.Unlock()
 	c := newConn(id)
 	m.conns[id] = c
+	vtellog.Debugf("[mux] registered conn %08x (server-side, pre-dial)", id)
 	return c
 }
 
@@ -165,6 +179,7 @@ func (m *Mux) RemoveConn(id uint32) {
 	if c, ok := m.conns[id]; ok {
 		c.Close()
 		delete(m.conns, id)
+		vtellog.Debugf("[mux] removed conn %08x", id)
 	}
 }
 
@@ -172,6 +187,7 @@ func (m *Mux) RemoveConn(id uint32) {
 func (m *Mux) HandleFrame(f *protocol.Frame) {
 	switch f.Type {
 	case protocol.TypeConnect:
+		vtellog.Debugf("[mux] recv CONNECT connID=%08x", f.ConnID)
 		if m.onConnect != nil {
 			cp, err := protocol.ParseConnectPayload(f.Payload)
 			if err != nil {
@@ -181,17 +197,21 @@ func (m *Mux) HandleFrame(f *protocol.Frame) {
 			m.onConnect(f.ConnID, cp)
 		}
 	case protocol.TypeConnectACK:
+		vtellog.Debugf("[mux] recv CONNECT_ACK connID=%08x", f.ConnID)
 		if m.onConnectACK != nil {
 			m.onConnectACK(f.ConnID)
 		}
 	case protocol.TypeData:
 		c := m.GetConn(f.ConnID)
 		if c == nil {
+			vtellog.Debugf("[mux] recv DATA connID=%08x seq=%d bytes=%d for unknown conn, dropped", f.ConnID, f.SeqNum, len(f.Payload))
 			return
 		}
 		c.MarkUsed()
+		vtellog.Debugf("[mux] recv DATA connID=%08x seq=%d bytes=%d", f.ConnID, f.SeqNum, len(f.Payload))
 		m.deliverOrdered(c, f.SeqNum, f.Payload)
 	case protocol.TypeClose, protocol.TypeReset:
+		vtellog.Debugf("[mux] recv %s connID=%08x", frameTypeName(f.Type), f.ConnID)
 		c := m.GetConn(f.ConnID)
 		if c != nil {
 			c.Close()
@@ -211,6 +231,7 @@ func (m *Mux) deliverOrdered(c *Conn, seq uint32, payload []byte) {
 	c.recvMu.Lock()
 	if seq < c.recvExpected {
 		c.recvMu.Unlock()
+		vtellog.Debugf("[mux] conn %08x: dropped duplicate seq=%d (expected=%d)", c.ID, seq, c.recvExpected)
 		return
 	}
 	if seq != c.recvExpected {
@@ -218,6 +239,7 @@ func (m *Mux) deliverOrdered(c *Conn, seq uint32, payload []byte) {
 			c.recvPending[seq] = payload
 		}
 		c.recvMu.Unlock()
+		vtellog.Debugf("[mux] conn %08x: buffered out-of-order seq=%d (expected=%d, pending=%d)", c.ID, seq, c.recvExpected, len(c.recvPending))
 		return
 	}
 

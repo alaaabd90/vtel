@@ -11,6 +11,7 @@ import (
 	"github.com/alaaabd90/vtel/pool"
 	"github.com/alaaabd90/vtel/protocol"
 	"github.com/alaaabd90/vtel/socks5"
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // connectAttemptTimeout is the per-link deadline for a CONNECT_ACK. Shorter
@@ -96,6 +97,7 @@ func (c *Client) recvLoop(lr *linkRuntime) {
 			fmt.Printf("[client] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
 		}
+		vtellog.Debugf("[client] link %d recv batch: %d frame(s), %d compressed bytes", lr.link.ID, len(frames), len(compressed))
 		for _, f := range frames {
 			lr.mux.HandleFrame(f)
 		}
@@ -103,6 +105,7 @@ func (c *Client) recvLoop(lr *linkRuntime) {
 }
 
 func (c *Client) handleSOCKS(conn net.Conn, req *socks5.ConnectRequest) {
+	vtellog.Debugf("[client] SOCKS5 CONNECT request: %s", req.String())
 	excluded := make(map[int]bool)
 	for attempt := 1; attempt <= maxConnectAttempts; attempt++ {
 		link := c.pool.PickLeastConnExcluding(excluded)
@@ -155,7 +158,9 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 			conn.Close()
 			return true
 		}
+		vtellog.Debugf("[client] link %d conn %08x: relaying", lr.link.ID, tc.ID)
 		lr.mux.Relay(conn, tc)
+		vtellog.Debugf("[client] link %d conn %08x: relay ended", lr.link.ID, tc.ID)
 		lr.link.ReleaseStream()
 		return true
 	case <-tc.CloseCh:

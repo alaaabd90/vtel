@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // ConnectRequest represents a parsed SOCKS5 CONNECT request.
@@ -145,6 +147,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		(s.RejectIPv6 && isIPv6LiteralTarget(req)) ||
 		isMapDNSFakeIP(req) ||
 		isBenchmarkIP(req) {
+		vtellog.Debugf("[socks5] immediate-reject %s", req.String())
 		rejectHostUnreachable(conn)
 		return
 	}

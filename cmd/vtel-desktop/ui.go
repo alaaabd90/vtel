@@ -223,6 +223,9 @@ func buildSettingsView(s *appState) fyne.CanvasObject {
 	rejectIPv6Check := widget.NewCheck("Reject IPv6 literal targets immediately", nil)
 	rejectIPv6Check.SetChecked(cfg.RejectIPv6)
 
+	debugCheck := widget.NewCheck("Verbose debug logging (shown in the Logs tab)", nil)
+	debugCheck.SetChecked(cfg.Debug)
+
 	listenEntry := widget.NewEntry()
 	listenEntry.SetText(cfg.Listen)
 
@@ -245,6 +248,7 @@ func buildSettingsView(s *appState) fyne.CanvasObject {
 		cfg.Secret = secretEntry.Text
 		cfg.CompressionLevel = compressionSelect.Selected
 		cfg.RejectIPv6 = rejectIPv6Check.Checked
+		cfg.Debug = debugCheck.Checked
 		cfg.Listen = strings.TrimSpace(listenEntry.Text)
 		if quietHoursCheck.Checked {
 			start, err1 := strconv.Atoi(strings.TrimSpace(startEntry.Text))
@@ -273,6 +277,7 @@ func buildSettingsView(s *appState) fyne.CanvasObject {
 		widget.NewCard("Listen address", "SOCKS5 address this app listens on.", listenEntry),
 		widget.NewCard("Compression level", "", compressionSelect),
 		widget.NewCard("IPv6", "", rejectIPv6Check),
+		widget.NewCard("Debug logging", "Traces mux frames, pool link picks, and batch flushes. Off by default; turn off once you've found what you need.", debugCheck),
 		widget.NewCard("Quiet hours", "Widen the flush cadence during a daily window instead of pausing.",
 			container.NewVBox(quietHoursCheck,
 				container.NewGridWithColumns(3,

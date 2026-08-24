@@ -43,6 +43,13 @@ type Config struct {
 	// window instead of pausing sends - see protocol.QuietHoursConfig.
 	QuietHours *protocol.QuietHoursConfig `json:"quiet_hours"`
 
+	// Debug enables verbose [debug]-prefixed logging across every vtel
+	// package (see vtellog) - per-frame mux tracing, pool pick/health
+	// decisions, batch flush stats, DNS cache hits/misses. Off by default;
+	// can also be forced on via the VTEL_DEBUG=1 env var regardless of this
+	// field.
+	Debug bool `json:"debug,omitempty"`
+
 	Links []LinkConfig `json:"links"`
 }
 

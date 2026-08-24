@@ -3,6 +3,7 @@ package app.vtel.client
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.time.Instant
@@ -45,9 +46,11 @@ class VtelEngine(
         val processBuilder = ProcessBuilder(engine.absolutePath, "-config", configFile.absolutePath)
             .directory(context.filesDir)
             .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
         applyGoRuntimeLimits(processBuilder)
-        process = processBuilder.start().also { child -> watchProcessExit(child, logFile) }
+        val child = processBuilder.start()
+        process = child
+        val outputThread = streamProcessOutput(child, logFile)
+        watchProcessExit(child, logFile, outputThread)
 
         Thread.sleep(250)
         process?.let { child ->
@@ -121,9 +124,31 @@ class VtelEngine(
         error("local SOCKS port is still in use on $bindHost:$port")
     }
 
-    private fun watchProcessExit(child: Process, logFile: File) {
+    // streamProcessOutput tees the engine subprocess's combined stdout/stderr
+    // (see redirectErrorStream) both into the persistent log file the Logs
+    // tab already tails and into Logcat with tag TAG, so `adb logcat -s
+    // VtelEngine` shows every line - including vtel core's [debug] tracing
+    // (see vtellog.Debugf) - live over USB while testing, not just after a
+    // pull of vtel.log. Returns the reader thread so watchProcessExit can
+    // join it before reading the file's tail on exit.
+    private fun streamProcessOutput(child: Process, logFile: File): Thread =
+        thread(name = "vtel-engine-stdout", start = true) {
+            runCatching {
+                FileOutputStream(logFile, true).bufferedWriter().use { writer ->
+                    child.inputStream.bufferedReader().forEachLine { line ->
+                        writer.write("${Instant.now()} $line")
+                        writer.newLine()
+                        writer.flush()
+                        Log.d(TAG, line)
+                    }
+                }
+            }
+        }
+
+    private fun watchProcessExit(child: Process, logFile: File, outputThread: Thread) {
         thread(name = "vtel-engine-watch", start = true) {
             val code = runCatching { child.waitFor() }.getOrNull() ?: return@thread
+            runCatching { outputThread.join(500) }
             val unexpected = synchronized(this) {
                 if (process !== child) {
                     false

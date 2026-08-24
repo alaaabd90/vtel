@@ -12,6 +12,7 @@ import (
 
 	"github.com/alaaabd90/vtel/tunnel"
 	"github.com/alaaabd90/vtel/vtelconfig"
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // configDir resolves a per-user config directory the same way on Windows
@@ -197,6 +198,7 @@ func (s *appState) connect() error {
 		s.setLastError(err.Error())
 		return err
 	}
+	vtellog.SetDebug(cfg.Debug)
 
 	specs, err := vtelconfig.BuildLinkSpecs(&cfg, func(i int, botID int64, err error) {
 		if err != nil {

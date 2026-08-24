@@ -9,6 +9,8 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -64,13 +66,19 @@ func (l *Link) Healthy(now time.Time) bool {
 
 // RecordSuccess clears failure state.
 func (l *Link) RecordSuccess() {
+	if l.consecutiveFails.Load() > 0 || l.unhealthyUntilNS.Load() > 0 {
+		vtellog.Debugf("[pool] link %d recovered", l.ID)
+	}
 	l.consecutiveFails.Store(0)
 	l.unhealthyUntilNS.Store(0)
 }
 
 func (l *Link) recordBad() {
-	if l.consecutiveFails.Add(1) >= UnhealthyThreshold {
+	n := l.consecutiveFails.Add(1)
+	vtellog.Debugf("[pool] link %d failure #%d", l.ID, n)
+	if n >= UnhealthyThreshold {
 		l.unhealthyUntilNS.Store(time.Now().Add(UnhealthyCooldown).UnixNano())
+		vtellog.Debugf("[pool] link %d marked UNHEALTHY for %v", l.ID, UnhealthyCooldown)
 	}
 }
 
@@ -121,9 +129,16 @@ func (p *Pool) AnyHealthy() bool {
 // link is excluded.
 func (p *Pool) PickLeastConnExcluding(exclude map[int]bool) *Link {
 	if best := p.pickFrom(exclude, true); best != nil {
+		vtellog.Debugf("[pool] picked link %d (healthy, active=%d)", best.ID, best.ActiveStreams())
 		return best
 	}
-	return p.pickFrom(exclude, false)
+	best := p.pickFrom(exclude, false)
+	if best != nil {
+		vtellog.Debugf("[pool] picked link %d (degraded: no healthy links available)", best.ID)
+	} else {
+		vtellog.Debugf("[pool] no link available (all excluded)")
+	}
+	return best
 }
 
 func (p *Pool) pickFrom(exclude map[int]bool, requireHealthy bool) *Link {

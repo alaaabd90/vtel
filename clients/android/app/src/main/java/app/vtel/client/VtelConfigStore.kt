@@ -27,6 +27,11 @@ object VtelConfigStore {
                 put("reject_ipv6", false)
                 put("quiet_hours", JSONObject.NULL)
                 put("auto_connect", false)
+                // On by default for this testing phase (see the Settings
+                // screen's toggle to turn it off later) - surfaces every
+                // vtel core package's [debug] trace via VtelEngine's log
+                // tee to both the Logs tab and adb logcat.
+                put("debug", true)
                 put("links", JSONArray())
             }
             file.writeText(fresh.toString(2))

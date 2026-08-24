@@ -8,6 +8,7 @@ import (
 
 	"github.com/alaaabd90/vtel/pool"
 	"github.com/alaaabd90/vtel/protocol"
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // Server runs the server side: receives tunnel frames from a pool of links,
@@ -63,6 +64,7 @@ func (s *Server) recvLoop(lr *linkRuntime) {
 			fmt.Printf("[server] link %d decompress error: %v\n", lr.link.ID, err)
 			continue
 		}
+		vtellog.Debugf("[server] link %d recv batch: %d frame(s), %d compressed bytes", lr.link.ID, len(frames), len(compressed))
 		for _, f := range frames {
 			lr.mux.HandleFrame(f)
 		}
@@ -80,6 +82,7 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 	// connection". Registering first means it buffers in DataCh instead.
 	tc := lr.mux.RegisterConn(connID)
 
+	dialStart := time.Now()
 	dialTarget := s.dns.resolveTarget(context.Background(), target)
 	conn, err := net.DialTimeout("tcp", dialTarget, 10*time.Second)
 	if err != nil {
@@ -88,6 +91,7 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 		lr.mux.SendReset(connID)
 		return
 	}
+	vtellog.Debugf("[server] link %d conn %08x: dialed %s -> %s in %v", lr.link.ID, connID, target, dialTarget, time.Since(dialStart))
 
 	lr.batcher.Add(&protocol.Frame{
 		Type:   protocol.TypeConnectACK,
@@ -96,6 +100,7 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 
 	// Relay traffic
 	lr.mux.Relay(conn, tc)
+	vtellog.Debugf("[server] link %d conn %08x: relay ended", lr.link.ID, connID)
 }
 
 func (s *Server) Stop() {

@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -278,6 +280,7 @@ private fun SettingsScreen(activity: ComponentActivity, config: JSONObject, onCo
     var compression by remember { mutableStateOf(config.optString("compression_level", "fastest")) }
     var rejectIPv6 by remember { mutableStateOf(config.optBoolean("reject_ipv6", false)) }
     var autoConnect by remember { mutableStateOf(config.optBoolean("auto_connect", false)) }
+    var debug by remember { mutableStateOf(config.optBoolean("debug", true)) }
     var status by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -293,12 +296,17 @@ private fun SettingsScreen(activity: ComponentActivity, config: JSONObject, onCo
             Switch(checked = autoConnect, onCheckedChange = { autoConnect = it })
             Text(" Auto-connect on boot (requires VPN permission already granted once)")
         }
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Switch(checked = debug, onCheckedChange = { debug = it })
+            Text(" Verbose debug logging (Logs tab + adb logcat, tag VtelEngine)")
+        }
         Button(onClick = {
             config.put("secret", secret)
             config.put("listen", listen)
             config.put("compression_level", compression)
             config.put("reject_ipv6", rejectIPv6)
             config.put("auto_connect", autoConnect)
+            config.put("debug", debug)
             VtelConfigStore.save(activity, config)
             status = "Saved. Reconnect to apply."
             onConfigChanged()
@@ -352,17 +360,24 @@ private fun ImportScreen(activity: ComponentActivity, onImported: () -> Unit) {
 
 @Composable
 private fun LogsScreen(activity: ComponentActivity) {
+    var showHev by remember { mutableStateOf(false) }
     var lines by remember { mutableStateOf(listOf<String>()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(showHev) {
+        val fileName = if (showHev) "hev-tun2socks.log" else "vtel.log"
         while (true) {
-            val logFile = java.io.File(java.io.File(activity.filesDir, "logs"), "vtel.log")
+            val logFile = java.io.File(java.io.File(activity.filesDir, "logs"), fileName)
             lines = runCatching { logFile.readLines().takeLast(300) }.getOrDefault(emptyList())
             delay(1500)
         }
     }
     Column {
         Text("Logs", style = MaterialTheme.typography.titleMedium)
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
+        Row(modifier = Modifier.padding(vertical = 8.dp)) {
+            Button(onClick = { showHev = false }, enabled = showHev) { Text("vtel engine") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = { showHev = true }, enabled = !showHev) { Text("hev tunnel") }
+        }
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(lines) { line -> Text(line, style = MaterialTheme.typography.bodySmall) }
         }
     }

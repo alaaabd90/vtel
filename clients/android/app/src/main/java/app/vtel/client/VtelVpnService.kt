@@ -88,8 +88,10 @@ class VtelVpnService : VpnService() {
                 val listenPort = parts.getOrNull(1)?.toIntOrNull() ?: 1080
                 val readinessHost = if (listenHost == "0.0.0.0") "127.0.0.1" else listenHost
 
+                Log.d(TAG, "connect: starting engine, listen=$listenHost:$listenPort")
                 engine.start(configJson, listenHost, listenPort)
                 engine.waitUntilReady(readinessHost, listenPort)
+                Log.d(TAG, "connect: engine ready")
 
                 val configureIntent = PendingIntent.getActivity(
                     this,
@@ -122,10 +124,13 @@ class VtelVpnService : VpnService() {
                 val established = builder.establish()
                     ?: error("VpnService.Builder.establish() returned null (permission revoked?)")
                 vpnInterface = established
+                Log.d(TAG, "connect: TUN established, mtu=$DEFAULT_MTU addr=$TUN_IPV4_ADDRESS")
 
                 val tunFd = established.detachFd()
                 val hevConfigFile = writeTunnelConfig(listenPort)
+                Log.d(TAG, "connect: starting hev-socks5-tunnel, tunFd=$tunFd config=${hevConfigFile.absolutePath}")
                 tunnel.TProxyStartService(hevConfigFile.absolutePath, tunFd)
+                Log.d(TAG, "connect: hev-socks5-tunnel started")
 
                 running = true
                 VtelServiceState.state = VtelConnState.CONNECTED
@@ -209,7 +214,8 @@ class VtelVpnService : VpnService() {
               cache-size: 10000
 
             misc:
-              log-level: warn
+              log-level: debug
+              log-file: ${File(File(filesDir, "logs").apply { mkdirs() }, "hev-tun2socks.log").absolutePath}
             """.trimIndent() + "\n",
         )
         return configFile

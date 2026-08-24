@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 const (
@@ -71,6 +73,9 @@ func (p *Poller) Run() {
 			continue
 		}
 		errorBackoff = pollerInitialBackoff
+		if len(updates) > 0 {
+			vtellog.Debugf("[poller] peer %d channel %d: got %d update(s), offset now %d", p.peerBotID, p.channelID, len(updates), p.offset)
+		}
 
 		var items []batchItem
 
@@ -127,6 +132,7 @@ func (p *Poller) Run() {
 					continue
 				}
 			}
+			vtellog.Debugf("[poller] peer %d: delivering batch %s (%d bytes)", p.peerBotID, item.sortKey, len(data))
 			select {
 			case p.recvCh <- data:
 			case <-p.done:

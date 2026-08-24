@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/alaaabd90/vtel/vtelconfig"
+	"github.com/alaaabd90/vtel/vtellog"
 )
 
 // LinkConfig and Config are aliases onto vtelconfig's shared definitions
@@ -18,7 +19,9 @@ type Config = vtelconfig.Config
 
 func ParseConfig() Config {
 	var path string
+	var debugFlag bool
 	flag.StringVar(&path, "config", "", "Path to JSON config file")
+	flag.BoolVar(&debugFlag, "debug", false, "Enable verbose debug logging (also VTEL_DEBUG=1)")
 	flag.Parse()
 
 	if path == "" {
@@ -43,5 +46,6 @@ func ParseConfig() Config {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	vtellog.SetDebug(c.Debug || debugFlag)
 	return c
 }

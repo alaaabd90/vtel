@@ -211,6 +211,7 @@ curl -x socks5h://127.0.0.1:1080 https://ipv4.ident.me
 | `compression_level` | `fastest` \| `default` \| `better` \| `best` | `fastest` |
 | `reject_ipv6` | Client only: immediately reject IPv6 literal SOCKS targets | `false` |
 | `quiet_hours` | `{start_hour, end_hour, timezone}` — widens the flush cadence during this daily window instead of pausing (see Traffic shaping below) | disabled |
+| `debug` | Verbose `[debug]`-prefixed tracing across every package (mux frames, pool link picks, batch flushes, DNS cache) — see Debugging below | `false` (Android app default: `true`) |
 | `links` | Array of `{token, peer_bot_id, channel_id}` | required, ≥1 |
 
 ## CLI reference
@@ -243,6 +244,40 @@ account-proxy equivalents — those are Drive/Google-specific concepts with
 no counterpart in vtel's architecture, so the menu doesn't fabricate
 matching items for them; see "What's ported from gdrive" above for what
 *does* carry over.
+
+## Debugging
+
+Every front end shares one debug-logging switch: the `debug` config field
+(or the `VTEL_DEBUG=1` environment variable, which always wins regardless
+of the field). Once on, every vtel package prints `[debug]`-prefixed
+tracing through the same log path each front end already uses — SOCKS5
+CONNECTs, mux frame types and connection lifecycle, pool link-pick/health
+decisions, batch flush sizes and send timing, DNS cache hits/misses,
+Telegram send/poll round trips.
+
+- **VPS**: `vtel settings` → `f) Toggle debug logging`, then `vtel restart`.
+  Or force it on for one run without touching config: `vtel -config
+  <path> -debug`. Watch it live with `vtel logs` (`journalctl -u vtel -f`
+  under the hood).
+- **Desktop**: Settings tab → "Debug logging" toggle, then reconnect. Shows
+  up in the Logs tab immediately (it's the same captured stdout as
+  everything else there).
+- **Android**: Settings tab → "Verbose debug logging" toggle (**on by
+  default** for now, since this is still an early build). The Logs tab has
+  two sources — "vtel engine" (the Go core, where `[debug]` lines show up)
+  and "hev tunnel" (the native TUN↔SOCKS5 bridge, always at `debug`
+  level). For live inspection over USB: enable Developer Options → USB
+  debugging on the phone, connect it, then:
+  ```bash
+  adb logcat -s VtelEngine:* VtelVpn:*
+  ```
+  `VtelEngine` carries the Go core's entire output (info lines plus every
+  `[debug]` trace when the toggle is on); `VtelVpn` carries the
+  VPN-service-level lifecycle (TUN setup, hev start, permission/error
+  paths). Both log files also persist on-device at
+  `/data/data/app.vtel.client/files/logs/{vtel.log,hev-tun2socks.log}` (pull
+  with `adb pull`, or read via the app's own Logs tab, if the device isn't
+  rooted and the app isn't debuggable enough for `run-as`).
 
 ## Security
 
