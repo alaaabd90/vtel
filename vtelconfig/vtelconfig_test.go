@@ -82,6 +82,21 @@ func TestValidateRejectsIncompleteLink(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsPositiveChannelID guards against a real bug found via
+// live device testing: a phone's numeric keyboard makes it easy to drop the
+// leading "-" when typing a channel ID, silently producing a positive
+// number that points at a different (nonexistent) chat - Telegram then
+// rejects every send with an opaque "chat not found" API error deep inside
+// the sender, far from the actual mistake. Channel/supergroup chat IDs are
+// always negative, so this is safe to reject outright.
+func TestValidateRejectsPositiveChannelID(t *testing.T) {
+	c := validConfig()
+	c.Links[0].ChannelID = 1004465080905
+	if err := Validate(&c); err == nil {
+		t.Fatal("Validate() = nil, want error for positive channel_id")
+	}
+}
+
 // BuildLinkSpecs always calls telegram.NewAPI (the real api.telegram.org
 // host) internally - it has no seam to point at a fake server, so these
 // tests only cover the paths that fail before/without a real network call:

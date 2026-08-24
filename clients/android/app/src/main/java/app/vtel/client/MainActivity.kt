@@ -254,12 +254,22 @@ private fun LinksScreen(activity: ComponentActivity, config: JSONObject, onConfi
                 Text("Add a link", style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text("Bot token") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = peerBotId, onValueChange = { peerBotId = it }, label = { Text("Peer bot user ID") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = channelId, onValueChange = { channelId = it }, label = { Text("Channel ID") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = channelId,
+                    onValueChange = { channelId = it },
+                    label = { Text("Channel ID") },
+                    supportingText = { Text("Always negative, e.g. -1001234567890 - don't drop the minus sign") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Button(onClick = {
                     val peer = peerBotId.trim().toLongOrNull()
                     val chan = channelId.trim().toLongOrNull()
                     if (token.isBlank() || peer == null || chan == null) {
                         status = "Enter a token and valid numeric IDs"
+                        return@Button
+                    }
+                    if (chan > 0) {
+                        status = "Channel ID must be negative (Telegram channel/supergroup IDs always start with -100...) - did you drop the leading minus sign?"
                         return@Button
                     }
                     VtelConfigStore.addLink(activity, config, token.trim(), peer, chan)

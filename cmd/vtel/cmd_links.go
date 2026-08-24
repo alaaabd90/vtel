@@ -78,6 +78,9 @@ func linksAddInteractive(reader *bufio.Reader) error {
 	if err != nil {
 		return fmt.Errorf("invalid channel_id: %w", err)
 	}
+	if ch > 0 {
+		return fmt.Errorf("channel_id must be negative (Telegram channel/supergroup IDs always start with -100...) - did you drop the leading minus sign?")
+	}
 
 	if token == "" || peer == 0 || ch == 0 {
 		return fmt.Errorf("token, peer_bot_id, and channel_id are all required")

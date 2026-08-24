@@ -179,6 +179,10 @@ func buildLinksView(s *appState, refreshStatus func()) fyne.CanvasObject {
 			statusLabel.SetText("Invalid channel_id: " + err.Error())
 			return
 		}
+		if ch > 0 {
+			statusLabel.SetText("Channel ID must be negative (Telegram channel/supergroup IDs always start with -100...) - did you drop the leading minus sign?")
+			return
+		}
 		token := strings.TrimSpace(tokenEntry.Text)
 		if token == "" {
 			statusLabel.SetText("Bot token is required")

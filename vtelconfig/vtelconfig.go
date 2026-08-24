@@ -87,6 +87,15 @@ func Validate(c *Config) error {
 		if l.ChannelID == 0 {
 			return fmt.Errorf("links[%d].channel_id is required", i)
 		}
+		// Telegram channel/supergroup chat IDs are always negative (e.g.
+		// -1001234567890) - a positive value here is never a legitimate
+		// channel ID, it's someone losing the leading "-" (easy to do on a
+		// phone's numeric keyboard). Caught here so it fails fast with a
+		// clear message instead of surfacing later as an opaque Telegram
+		// "chat not found" API error from deep inside the sender.
+		if l.ChannelID > 0 {
+			return fmt.Errorf("links[%d].channel_id must be negative (Telegram channel/supergroup IDs always start with -100...) - got %d, did you drop the leading minus sign?", i, l.ChannelID)
+		}
 	}
 	return nil
 }
