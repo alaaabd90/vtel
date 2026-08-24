@@ -19,6 +19,12 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+if (!hasReleaseSigning) {
+    logger.warn(
+        "vtel: VTEL_ANDROID_KEYSTORE_* secrets not set - release APK will be " +
+            "debug-signed (installable for testing, not suitable for distribution)."
+    )
+}
 val androidNativeAbis = listOf("arm64-v8a", "armeabi-v7a")
 val goAndroidTargets = listOf(
     Triple("arm64-v8a", "arm64", ""),
@@ -195,8 +201,16 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
+            // Fall back to the auto-generated debug signing config when no real
+            // release keystore secrets are configured, so assembleRelease still
+            // produces an APK Android will actually install (an unsigned APK is
+            // rejected with "package appears to be invalid"). Switches to real
+            // release signing automatically once VTEL_ANDROID_KEYSTORE_* secrets
+            // are set.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }
