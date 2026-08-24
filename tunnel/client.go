@@ -14,10 +14,22 @@ import (
 	"github.com/alaaabd90/vtel/vtellog"
 )
 
-// connectAttemptTimeout is the per-link deadline for a CONNECT_ACK. Shorter
-// than teltun's original single-shot 30s so a stalled/unhealthy link can be
-// retried on another one within a reasonable total time.
-const connectAttemptTimeout = 5 * time.Second
+// connectAttemptTimeout is the per-link deadline for a CONNECT_ACK.
+//
+// Originally 5s (shorter than teltun's original single-shot 30s) so a
+// stalled/unhealthy link could be retried on another one within a
+// reasonable total time. Found via live device testing to be far too
+// aggressive for this transport's real round-trip characteristics: the
+// server was dialing and sending CONNECT_ACK back correctly, but Telegram's
+// own update-delivery latency to a long-polling client varies a lot in
+// practice - often under a second, but observed running to several seconds
+// and occasionally much longer under real load. Every CONNECT_ACK that
+// missed the old 5s window arrived too late and was silently dropped (the
+// client had already deleted its pending-ACK entry), so real connections
+// failed even though every layer below the timeout was working. 20s trades
+// slower failover across a multi-link pool for connections actually
+// succeeding, which matters more here.
+const connectAttemptTimeout = 20 * time.Second
 
 // maxConnectAttempts bounds how many links a single SOCKS CONNECT will try
 // before giving up.
@@ -57,6 +69,8 @@ func (c *Client) newClientLink(spec LinkSpec) *linkRuntime {
 		if ok {
 			close(ch)
 			delete(c.pending, connID)
+		} else {
+			vtellog.Debugf("[client] link %d CONNECT_ACK %08x arrived after its wait already gave up", lr.link.ID, connID)
 		}
 		c.pendingMu.Unlock()
 	}
