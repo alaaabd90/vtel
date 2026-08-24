@@ -131,6 +131,37 @@ actual connect/disconnect/Links/Settings/Import flows against a live
 Telegram bot pool — same as everything else in this project, that needs
 real bot tokens and the real network.
 
+## Mobile app (Android)
+
+`clients/android` is a whole-device VPN client, modeled on gdrive's own
+Android app (the sibling project's `clients/android`) but scoped much
+smaller — VPN-only, one config, no multi-account fan-out, no IP scanner, no
+per-app routing, no device-locking, no LAN sharing. See its own
+`clients/android/README.md` for the build/architecture details: it packages
+`cmd/vtel` as a native Android executable (the same "ship an arbitrary
+binary under jniLibs/" trick gdrive's own app uses) and bridges the device's
+TUN interface to it via a vendored copy of
+[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)
+(`third_party/hev-socks5-tunnel`, MIT-licensed) — the exact same TUN-to-
+SOCKS bridge gdrive's Android app uses, rebuilt here under vtel's own
+package/class name since its native code resolves the Kotlin class to call
+back into by name at load time, baked in at compile time.
+
+```
+cd clients/android
+./gradlew :app:assembleDebug --console=plain
+```
+
+**Not built or run on a device in this environment** — no Android SDK/NDK
+were available while developing this, so unlike the desktop app (where a
+missing toolchain was actually installed and the build genuinely verified),
+this code has only been structurally reviewed against gdrive's own proven
+Android architecture, not compiled. The repo's release workflow includes a
+`build-android` CI job (adapted from gdrive's own, which does work) that
+will produce a real APK or surface real build errors on the next tag push —
+that's the first actual compilation this code gets. Treat it as unverified
+until that comes back clean and it's been installed on a real phone.
+
 ## Usage
 
 Both client and server take one JSON config file via `-config`:

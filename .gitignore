@@ -10,3 +10,19 @@
 /smoketest.exe
 /vtel-desktop
 /vtel-desktop.exe
+
+# Android (clients/android) build outputs and local machine config - not
+# source, shouldn't be committed. Paths are relative-pattern (no leading
+# slash) since they recur under both the root and app/ module directories.
+clients/android/local.properties
+clients/android/**/build/
+clients/android/.gradle/
+clients/android/.idea/
+clients/android/*.iml
+clients/android/app/*.iml
+
+# hev-socks5-tunnel's own build outputs when built in-place via ndk-build
+# (buildHevTun2socks copies the results out to a Gradle-generated dir, but
+# ndk-build's own intermediates land here first).
+third_party/hev-socks5-tunnel/obj/
+third_party/hev-socks5-tunnel/libs/

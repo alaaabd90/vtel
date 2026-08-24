@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-server:
     name: Build vtel binaries
     runs-on: ubuntu-22.04
     steps:
@@ -83,5 +83,104 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: dist/${{ matrix.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-android:
+    name: Android APK
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: |
+          echo "y" | sdkmanager --install "ndk;27.0.12077973" 2>&1 | tail -5
+      - name: Write keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.VTEL_ANDROID_KEYSTORE_FILE }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > /tmp/vtel-release.jks
+            echo "VTEL_ANDROID_KEYSTORE_FILE=/tmp/vtel-release.jks" >> $GITHUB_ENV
+          fi
+      - name: Build
+        working-directory: clients/android
+        env:
+          VTEL_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.VTEL_ANDROID_KEYSTORE_PASSWORD }}
+          VTEL_ANDROID_KEY_ALIAS: ${{ secrets.VTEL_ANDROID_KEY_ALIAS }}
+          VTEL_ANDROID_KEY_PASSWORD: ${{ secrets.VTEL_ANDROID_KEY_PASSWORD }}
+        run: |
+          # set -o pipefail so this step's exit code is gradle's, not
+          # tail's - a piped command's exit code is otherwise the last
+          # command in the pipe regardless of earlier failures, which would
+          # let a real build failure here go unnoticed until a confusing
+          # "no APKs found" failure two steps later instead.
+          set -o pipefail
+          chmod +x gradlew
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          ./gradlew assembleRelease --no-daemon -Pvtel.version="$VERSION" 2>&1 | tail -200
+      - name: Rename APKs
+        run: |
+          shopt -s nullglob
+          mkdir -p dist
+          apks=(clients/android/app/build/outputs/apk/release/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "::error::no APKs found in clients/android/app/build/outputs/apk/release/ - the Build step should have failed already (see set -o pipefail there); this is a fallback so a future regression fails loudly here too instead of silently skipping the APK release."
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            name=$(basename "$apk" | sed 's/^app-/vtel-/; s/-release-unsigned//')
+            cp "$apk" "dist/$name"
+          done
+          ls -lh dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: GitHub Release
+    needs: [build-server, build-desktop, build-android]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## vtel ${{ github.ref_name }}
+
+            ### VPS - one-command install
+            ```bash
+            curl -sL https://raw.githubusercontent.com/alaaabd90/vtel/main/scripts/install.sh | bash
+            ```
+
+            ### Update existing install
+            ```bash
+            vtel update
+            ```
+
+            ### Assets
+            - `vtel-linux-amd64` / `vtel-linux-arm64` - VPS server + CLI manager
+            - `vtel-desktop-*` - Desktop GUI apps (Windows/Linux)
+            - `*.apk` - Android app
+
+            `SHA256SUMS` covers the VPS server binaries.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
