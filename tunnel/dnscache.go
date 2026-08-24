@@ -83,12 +83,18 @@ func (c *dnsCache) resolve(ctx context.Context, host string) ([]string, bool) {
 // an IP literal, or resolution fails/misses, target is returned unchanged -
 // dial falls back to doing its own resolution.
 //
-// Deliberately not ported: gdrive's address-family preference
-// (pickAddrForFamily, prefer_ipv4/ipv6_only/etc). That exists for gdrive's
-// mobile-tethering Happy-Eyeballs context; vtel's socks5.Server.RejectIPv6
-// already made the opposite call in Stage 7 (default false - vtel's targets
-// are ordinary internet hosts, not a tethering scenario), so there's no
-// family-preference knob here to feed.
+// Prefers IPv4 when a dual-stack lookup returns both: found via live
+// testing that the server VPS has no real IPv6 route out (dial errors
+// "network is unreachable" for the IPv6 address of ordinary dual-stack
+// domains like web.facebook.com), so picking uniformly at random across
+// both families made a random fraction of otherwise-fine connections fail
+// outright for no reason a client could work around. This is not the same
+// knob as gdrive's mobile-tethering Happy-Eyeballs preference (deliberately
+// not ported - vtel's socks5.Server.RejectIPv6 already made the opposite
+// call in Stage 7, since vtel's targets are ordinary internet hosts, not a
+// tethering scenario): that's about which family a *client* prefers to
+// attempt; this is the server picking the family it can actually route,
+// which matters regardless of any client preference.
 func (c *dnsCache) resolveTarget(ctx context.Context, target string) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -104,5 +110,20 @@ func (c *dnsCache) resolveTarget(ctx context.Context, target string) string {
 	if !ok || len(addrs) == 0 {
 		return target
 	}
-	return net.JoinHostPort(addrs[rand.Intn(len(addrs))], port)
+	return net.JoinHostPort(pickAddr(addrs), port)
+}
+
+// pickAddr picks a random address from a dual-stack result set, preferring
+// IPv4 when any is present - see resolveTarget's doc comment.
+func pickAddr(addrs []string) string {
+	var v4 []string
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			v4 = append(v4, a)
+		}
+	}
+	if len(v4) > 0 {
+		return v4[rand.Intn(len(v4))]
+	}
+	return addrs[rand.Intn(len(addrs))]
 }

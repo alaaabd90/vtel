@@ -92,6 +92,48 @@ func TestResolveTargetSubstitutesResolvedIP(t *testing.T) {
 	}
 }
 
+// TestResolveTargetPrefersIPv4WhenBothAvailable guards against a real bug
+// found via live device testing: the VPS running the server side has no
+// real IPv6 route out, so picking uniformly at random across a dual-stack
+// domain's IPv4 and IPv6 addresses made a random fraction of otherwise-fine
+// connections dial-fail outright ("network is unreachable") for no reason a
+// client could work around.
+func TestResolveTargetPrefersIPv4WhenBothAvailable(t *testing.T) {
+	c := newDNSCache()
+	c.entries["dualstack.invalid"] = dnsCacheEntry{
+		addrs:   []string{"2001:db8::1", "192.0.2.77"}, // IPv6 first, to catch an index-order bug too
+		expires: time.Now().Add(dnsCacheTTL),
+	}
+
+	for i := 0; i < 20; i++ { // rand-backed pick, so try enough times to catch a wrong implementation
+		got := c.resolveTarget(context.Background(), "dualstack.invalid:443")
+		host, _, err := net.SplitHostPort(got)
+		if err != nil {
+			t.Fatalf("resolveTarget result %q not a valid host:port: %v", got, err)
+		}
+		if host != "192.0.2.77" {
+			t.Fatalf("resolveTarget picked %q, want the IPv4 address 192.0.2.77 to be preferred", host)
+		}
+	}
+}
+
+func TestResolveTargetFallsBackToIPv6WhenNoIPv4(t *testing.T) {
+	c := newDNSCache()
+	c.entries["v6only.invalid"] = dnsCacheEntry{
+		addrs:   []string{"2001:db8::1"},
+		expires: time.Now().Add(dnsCacheTTL),
+	}
+
+	got := c.resolveTarget(context.Background(), "v6only.invalid:443")
+	host, _, err := net.SplitHostPort(got)
+	if err != nil {
+		t.Fatalf("resolveTarget result %q not a valid host:port: %v", got, err)
+	}
+	if host != "2001:db8::1" {
+		t.Fatalf("resolveTarget picked %q, want the only available IPv6 address", host)
+	}
+}
+
 func TestDNSCacheEvictsWhenFull(t *testing.T) {
 	c := newDNSCache()
 	for i := 0; i < dnsCacheMaxEntries; i++ {
