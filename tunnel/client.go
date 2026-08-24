@@ -29,11 +29,36 @@ import (
 // failed even though every layer below the timeout was working. 20s trades
 // slower failover across a multi-link pool for connections actually
 // succeeding, which matters more here.
-const connectAttemptTimeout = 20 * time.Second
+//
+// A var, not a const, purely so tests can shrink it instead of waiting out
+// the real 20s.
+var connectAttemptTimeout = 20 * time.Second
 
 // maxConnectAttempts bounds how many links a single SOCKS CONNECT will try
 // before giving up.
 const maxConnectAttempts = 3
+
+// maxInFlightConnectsPerLink bounds how many CONNECTs may be simultaneously
+// waiting for a CONNECT_ACK on one link. Added after live device testing
+// showed the real failure mode under real phone traffic wasn't "too slow" -
+// it was "unstable": a burst of 15+ simultaneous connection attempts (every
+// background app phoning home at once) all fired their CONNECT immediately
+// and raced for the same rate-limited channel, so most lost that race and
+// timed out having wasted a send slot on an attempt that was doomed from
+// the start, while only a lucky few got through. Gating admission means the
+// rest queue instead of racing: fewer wasted sends, and whichever CONNECT
+// does get a turn has a real, uncontended shot at succeeding within
+// connectAttemptTimeout - trading raw concurrency for predictability, which
+// matters more than speed on a deliberately slow, rate-limited transport.
+const maxInFlightConnectsPerLink = 2
+
+// connectAdmitTimeout bounds how long a CONNECT waits for an admission slot
+// (see maxInFlightConnectsPerLink) before giving up outright, so a very
+// deep backlog fails cleanly instead of the calling SOCKS5 client hanging
+// forever on a queue that never drains fast enough to matter to it anyway.
+//
+// A var, not a const, for the same reason as connectAttemptTimeout.
+var connectAdmitTimeout = 30 * time.Second
 
 // Client runs the client side: SOCKS5 server + a pool of tunnel links to Telegram.
 type Client struct {
@@ -48,6 +73,12 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[uint32]chan struct{}
 
+	// connectSem bounds concurrent in-flight CONNECT attempts per link - see
+	// maxInFlightConnectsPerLink. Built once at construction and never
+	// mutated afterward, so concurrent reads from multiple SOCKS5 handler
+	// goroutines need no locking.
+	connectSem map[int]chan struct{}
+
 	warmupCancel context.CancelFunc
 }
 
@@ -58,6 +89,10 @@ func NewClient(specs []LinkSpec, listenAddr string, rejectIPv6 bool) *Client {
 		pending:    make(map[uint32]chan struct{}),
 	}
 	c.links, c.pool = buildPool(specs, c.newClientLink)
+	c.connectSem = make(map[int]chan struct{}, len(c.links))
+	for id := range c.links {
+		c.connectSem[id] = make(chan struct{}, maxInFlightConnectsPerLink)
+	}
 	return c
 }
 
@@ -141,6 +176,15 @@ func (c *Client) handleSOCKS(conn net.Conn, req *socks5.ConnectRequest) {
 // failure not worth retrying on another link); false means the caller should
 // retry on a different link.
 func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkRuntime) bool {
+	sem := c.connectSem[lr.link.ID]
+	select {
+	case sem <- struct{}{}:
+	case <-time.After(connectAdmitTimeout):
+		vtellog.Debugf("[client] link %d: connect admission timed out after %v (too many in flight)", lr.link.ID, connectAdmitTimeout)
+		return false
+	}
+	releaseAdmit := func() { <-sem }
+
 	lr.link.AcquireStream()
 	tc := lr.mux.NewConn()
 
@@ -164,6 +208,7 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 
 	select {
 	case <-ackCh:
+		releaseAdmit() // outcome known; ongoing relay doesn't need this slot
 		lr.link.RecordSuccess()
 		if err := socks5.SendSuccess(conn); err != nil {
 			lr.mux.SendClose(tc.ID)
@@ -178,6 +223,7 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 		lr.link.ReleaseStream()
 		return true
 	case <-tc.CloseCh:
+		releaseAdmit()
 		// Connection was rejected by the server on this link; worth
 		// retrying on another one.
 		lr.link.RecordFailure()
@@ -188,6 +234,7 @@ func (c *Client) tryConnect(conn net.Conn, req *socks5.ConnectRequest, lr *linkR
 		lr.link.ReleaseStream()
 		return false
 	case <-time.After(connectAttemptTimeout):
+		releaseAdmit()
 		fmt.Printf("[client] link %d CONNECT_ACK timeout for %08x\n", lr.link.ID, tc.ID)
 		lr.link.RecordStall()
 		c.pendingMu.Lock()
