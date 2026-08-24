@@ -119,7 +119,10 @@ install_service_if_ready() {
         return
     fi
     local link_count
-    link_count=$(grep -c '"token"' "$CONFIG_PATH" 2>/dev/null || echo 0)
+    # grep -c already prints "0" on zero matches (and exits 1); the fallback
+    # must sit outside the substitution or its own "0" doubles up with
+    # grep's, producing "0\n0" and breaking the -eq test below.
+    link_count=$(grep -c '"token"' "$CONFIG_PATH" 2>/dev/null) || link_count=0
     if [[ "$link_count" -eq 0 ]]; then
         warn "No links configured yet - skipping service install."
         warn "Run 'vtel links add' to add one, then 'vtel install' to start the service."
