@@ -6,40 +6,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/alaaabd90/vtel/protocol"
+	"github.com/alaaabd90/vtel/vtelconfig"
 )
 
-// LinkConfig describes one bot/channel pair used as an independent tunnel
-// link (a "lane" in the pool).
-type LinkConfig struct {
-	Token     string `json:"token"`
-	PeerBotID int64  `json:"peer_bot_id"`
-	ChannelID int64  `json:"channel_id"`
-}
-
-// Config is the JSON-driven configuration for a vtel client or server.
-type Config struct {
-	Mode   string `json:"mode"`   // "client" or "server"
-	Listen string `json:"listen"` // SOCKS5 listen address (client mode)
-
-	// Secret derives the AEAD key used to encrypt every batch (added here
-	// for the envelope encryption layer; one shared secret across the pool).
-	Secret string `json:"secret"`
-
-	// CompressionLevel is one of "fastest" (default), "default", "better",
-	// or "best" - see protocol.ParseCompressionLevel.
-	CompressionLevel string `json:"compression_level"`
-
-	// RejectIPv6, client mode only: immediately reject IPv6 literal SOCKS
-	// targets instead of attempting them through the tunnel. Default false.
-	RejectIPv6 bool `json:"reject_ipv6"`
-
-	// QuietHours, if set, widens the adaptive idle timeout during a daily
-	// window instead of pausing sends - see protocol.QuietHoursConfig.
-	QuietHours *protocol.QuietHoursConfig `json:"quiet_hours"`
-
-	Links []LinkConfig `json:"links"`
-}
+// LinkConfig and Config are aliases onto vtelconfig's shared definitions
+// (also used by cmd/vtel-desktop) - kept as local names purely so the rest
+// of this package's CLI code (cli_paths.go, cmd_links.go, cmd_settings.go,
+// menu.go) didn't need touching when this moved out to a shared package.
+type LinkConfig = vtelconfig.LinkConfig
+type Config = vtelconfig.Config
 
 func ParseConfig() Config {
 	var path string
@@ -64,44 +39,9 @@ func ParseConfig() Config {
 		os.Exit(1)
 	}
 
-	if c.Mode != "client" && c.Mode != "server" {
-		fmt.Fprintln(os.Stderr, "Error: mode must be 'client' or 'server'")
-		os.Exit(1)
-	}
-	if len(c.Links) == 0 {
-		fmt.Fprintln(os.Stderr, "Error: at least one link is required")
-		os.Exit(1)
-	}
-	if c.Secret == "" {
-		fmt.Fprintln(os.Stderr, "Error: secret is required")
-		os.Exit(1)
-	}
-	if _, err := protocol.ParseCompressionLevel(c.CompressionLevel); err != nil {
+	if err := vtelconfig.Validate(&c); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-	if c.QuietHours != nil {
-		if c.QuietHours.StartHour < 0 || c.QuietHours.StartHour > 23 || c.QuietHours.EndHour < 0 || c.QuietHours.EndHour > 23 {
-			fmt.Fprintln(os.Stderr, "Error: quiet_hours.start_hour/end_hour must be 0-23")
-			os.Exit(1)
-		}
-	}
-	if c.Mode == "client" && c.Listen == "" {
-		c.Listen = "127.0.0.1:1080"
-	}
-	for i, l := range c.Links {
-		if l.Token == "" {
-			fmt.Fprintf(os.Stderr, "Error: links[%d].token is required\n", i)
-			os.Exit(1)
-		}
-		if l.PeerBotID == 0 {
-			fmt.Fprintf(os.Stderr, "Error: links[%d].peer_bot_id is required\n", i)
-			os.Exit(1)
-		}
-		if l.ChannelID == 0 {
-			fmt.Fprintf(os.Stderr, "Error: links[%d].channel_id is required\n", i)
-			os.Exit(1)
-		}
 	}
 	return c
 }

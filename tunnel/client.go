@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -201,4 +202,31 @@ func (c *Client) Retry429Counts() map[int]int64 {
 		counts[id] = lr.sender.Retry429Count()
 	}
 	return counts
+}
+
+// LinkStatus is a snapshot of one link's health/load, for UIs (the desktop/
+// mobile apps) that want to show real pool state rather than a fabricated
+// "connected" indicator.
+type LinkStatus struct {
+	ID            int
+	Healthy       bool
+	ActiveStreams int64
+	BytesPerSec   int64
+}
+
+// LinkStatuses returns a point-in-time snapshot of every link's health/load,
+// sorted by ID.
+func (c *Client) LinkStatuses() []LinkStatus {
+	now := time.Now()
+	out := make([]LinkStatus, 0, len(c.links))
+	for id, lr := range c.links {
+		out = append(out, LinkStatus{
+			ID:            id,
+			Healthy:       lr.link.Healthy(now),
+			ActiveStreams: lr.link.ActiveStreams(),
+			BytesPerSec:   lr.batcher.BytesPerSec(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }

@@ -92,6 +92,45 @@ Docker daemon was available while developing this — though the underlying
 `go build ./cmd/vtel` command it runs has been run and verified directly
 many times.)
 
+## Desktop app (Windows / Linux)
+
+`cmd/vtel-desktop` is a client-role GUI, modeled on gdrive's own desktop app
+(`cmd/gkdrive-desktop` in the sibling project) — same Fyne-based structure
+and sidebar-of-views layout, adapted to vtel's much simpler model: since a
+`tunnel.Client` already load-balances across every configured link
+internally, there's no multi-profile load-balancer layer to build (gdrive's
+desktop app runs one profile = one account per local port and balances
+across them itself; vtel-desktop is just one config, one client).
+
+```
+go build -o vtel-desktop ./cmd/vtel-desktop
+```
+
+**Requires CGO** (`CGO_ENABLED=1` and a C compiler) — Fyne's default
+renderer binds to OpenGL/GLFW, which is a cgo dependency with no pure-Go
+fallback. On Windows, a mingw-w64 toolchain works; on Linux you'll also
+need the X11/GL dev packages (`libgl1-mesa-dev xorg-dev libxcursor-dev
+libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev` on Debian/Ubuntu —
+the same list gdrive's own release workflow installs for its desktop
+build).
+
+Config lives in a per-user directory (`%AppData%\vtel\config.json` on
+Windows, `~/.config/vtel/config.json` on Linux) — a fresh launch creates an
+empty client-mode skeleton with a random secret automatically. Add links
+via the Links tab, or paste a complete config (e.g. copied from the server
+side) via Import. vtel's internal logging has no pluggable logger
+interface (it's plain `fmt.Printf` to stdout throughout); the desktop app
+redirects `os.Stdout` to its own Logs tab at startup to capture it without
+touching any core package.
+
+Verified in this environment: builds clean with CGO enabled, launches
+without a startup crash, and (after fixing two real background-goroutine
+UI-update violations Fyne's threading-model checker caught on first run)
+produces no more threading warnings on relaunch. Not yet verified: the
+actual connect/disconnect/Links/Settings/Import flows against a live
+Telegram bot pool — same as everything else in this project, that needs
+real bot tokens and the real network.
+
 ## Usage
 
 Both client and server take one JSON config file via `-config`:
@@ -320,11 +359,10 @@ vtel's much smaller scale (5-20 bots, not Drive-account-scale parallelism).
   harness), real network latency's effect on the adaptive batching tiers,
   and whether 20 concurrent bots on one channel trigger any Telegram-side
   throttling this design doesn't yet account for.
-- **`go test -race` was not run** in the environment this was built in (no
-  C compiler available for cgo, which `-race` requires) — the concurrent
-  flush-dispatch/buffer-pool code introduced in later stages is reasoned
-  about carefully and has passed repeated non-race test/smoketest runs,
-  but has not been race-detector-verified.
+- **`go test -race` now passes clean across the whole suite** (a C compiler
+  wasn't available earlier in development; once one was, `-race` — including
+  the concurrent flush-dispatch/buffer-pool/backpressure code from later
+  stages — and a `-race`-built `cmd/smoketest` run both came back clean).
 
 ## Disclaimer
 
