@@ -33,6 +33,25 @@ type Link struct {
 	// a nil WarmFn is simply skipped.
 	WarmFn func() error
 
+	// ThroughputBytesPerSec, if set, reports this link's current measured
+	// throughput (bytes/sec) - consulted by pickFrom as a tiebreak when
+	// multiple links are tied on ActiveStreams. Optional; nil means "no
+	// throughput signal", falling back to pure least-connections for ties
+	// involving this link.
+	//
+	// Ported from gdrive's historical bytesScore load-balancer tiebreak
+	// (cmd/gdrive-exit/lb.go, v1.0.91): pure connection-count selection
+	// degenerates to round-robin once load fans out evenly across
+	// upstreams, since every upstream ends up with the same connection
+	// count even when their actual throughput differs. gdrive later
+	// reverted this - not because the tiebreak itself was wrong (it fixed
+	// a real, tested fan-out bug), but because it got bundled with much
+	// heavier adaptive bandwidth-cap/burst-controller machinery that
+	// caused real regressions. This port is deliberately narrow: it's a
+	// tiebreak among links already tied on ActiveStreams, nothing more -
+	// no caps, no controllers.
+	ThroughputBytesPerSec func() int64
+
 	activeStreams    atomic.Int64
 	consecutiveFails atomic.Int32
 	unhealthyUntilNS atomic.Int64
@@ -117,11 +136,26 @@ func (p *Pool) pickFrom(exclude map[int]bool, requireHealthy bool) *Link {
 		if requireHealthy && !l.Healthy(now) {
 			continue
 		}
-		if best == nil || l.ActiveStreams() < best.ActiveStreams() {
+		if best == nil || betterCandidate(l, best) {
 			best = l
 		}
 	}
 	return best
+}
+
+// betterCandidate reports whether l should be preferred over cur: primarily
+// by ActiveStreams (least-connections), falling back to
+// ThroughputBytesPerSec as a tiebreak when both are tied - see
+// Link.ThroughputBytesPerSec's doc comment for why.
+func betterCandidate(l, cur *Link) bool {
+	lActive, curActive := l.ActiveStreams(), cur.ActiveStreams()
+	if lActive != curActive {
+		return lActive < curActive
+	}
+	if l.ThroughputBytesPerSec == nil || cur.ThroughputBytesPerSec == nil {
+		return false // no throughput signal on at least one side; keep the earlier (stable) pick
+	}
+	return l.ThroughputBytesPerSec() < cur.ThroughputBytesPerSec()
 }
 
 // RunWarmup starts one background goroutine per link that has a WarmFn set:

@@ -80,6 +80,59 @@ func TestUnhealthyLinkExcludedThenDegradesGracefully(t *testing.T) {
 	}
 }
 
+func TestPickLeastConnExcluding_TiesBreakOnLowerThroughput(t *testing.T) {
+	links := newTestLinks(3)
+	// All tied at 0 active streams - throughput must decide.
+	links[0].ThroughputBytesPerSec = func() int64 { return 5 * 1024 * 1024 }
+	links[1].ThroughputBytesPerSec = func() int64 { return 100 * 1024 } // lowest -> should win
+	links[2].ThroughputBytesPerSec = func() int64 { return 1024 * 1024 }
+	p := NewPool(links)
+
+	got := p.PickLeastConnExcluding(nil)
+	if got == nil || got.ID != 1 {
+		t.Fatalf("expected link 1 (lowest throughput on a tie), got %v", got)
+	}
+}
+
+func TestPickLeastConnExcluding_ActiveStreamsBeatsThroughputTiebreak(t *testing.T) {
+	links := newTestLinks(2)
+	links[0].AcquireStream()                                           // link 0 has 1 active stream
+	links[0].ThroughputBytesPerSec = func() int64 { return 0 }         // lowest throughput, but busier
+	links[1].ThroughputBytesPerSec = func() int64 { return 10 * 1024 } // higher throughput, but idle
+	p := NewPool(links)
+
+	got := p.PickLeastConnExcluding(nil)
+	if got == nil || got.ID != 1 {
+		t.Fatalf("expected link 1 (fewer active streams wins regardless of throughput), got %v", got)
+	}
+}
+
+func TestPickLeastConnExcluding_NilThroughputFnFallsBackToStablePick(t *testing.T) {
+	links := newTestLinks(2)
+	// Neither link sets ThroughputBytesPerSec; must not panic, and must
+	// deterministically keep the first-seen candidate on a tie.
+	p := NewPool(links)
+
+	got := p.PickLeastConnExcluding(nil)
+	if got == nil || got.ID != 0 {
+		t.Fatalf("expected link 0 (stable pick with no throughput signal), got %v", got)
+	}
+}
+
+func TestPickLeastConnExcluding_OneSidedThroughputFnIgnored(t *testing.T) {
+	links := newTestLinks(2)
+	links[1].ThroughputBytesPerSec = func() int64 { return 0 } // only one side set
+	p := NewPool(links)
+
+	// Must not panic when only one candidate has a throughput signal, and
+	// must fall back to the stable (first-seen) pick rather than comparing
+	// against a nil func.
+	got := p.PickLeastConnExcluding(nil)
+	if got == nil || got.ID != 0 {
+		t.Fatalf("expected link 0 (stable pick when only one side has a throughput signal), got %v", got)
+	}
+}
+
 func TestRunWarmupCallsImmediatelyAndStopsOnCancel(t *testing.T) {
 	l := &Link{ID: 0}
 	var calls atomic.Int64

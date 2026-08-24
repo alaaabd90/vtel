@@ -430,6 +430,12 @@ func (b *Batcher) baseAdaptiveIdleTimeout() time.Duration {
 	}
 }
 
+// BytesPerSec returns the current throughput measurement (see
+// updateBytesPerSec) - exposed for pool.Link's load-balancer tiebreak signal.
+func (b *Batcher) BytesPerSec() int64 {
+	return b.bytesPerSec.Load()
+}
+
 // updateBytesPerSec is a direct port of gdrive's muxLane.updateBytesPerSec:
 // a rolling one-second measurement window, updated at flush time rather
 // than via a separate ticker goroutine.

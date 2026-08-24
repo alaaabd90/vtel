@@ -15,12 +15,13 @@ import (
 type Server struct {
 	links map[int]*linkRuntime
 	pool  *pool.Pool
+	dns   *dnsCache // shared across all links - DNS resolution isn't link-scoped
 
 	warmupCancel context.CancelFunc
 }
 
 func NewServer(specs []LinkSpec) *Server {
-	s := &Server{}
+	s := &Server{dns: newDNSCache()}
 	s.links, s.pool = buildPool(specs, s.newServerLink)
 	return s
 }
@@ -79,7 +80,8 @@ func (s *Server) handleConnect(lr *linkRuntime, connID uint32, cp *protocol.Conn
 	// connection". Registering first means it buffers in DataCh instead.
 	tc := lr.mux.RegisterConn(connID)
 
-	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	dialTarget := s.dns.resolveTarget(context.Background(), target)
+	conn, err := net.DialTimeout("tcp", dialTarget, 10*time.Second)
 	if err != nil {
 		fmt.Printf("[server] link %d dial failed %08x -> %s: %v\n", lr.link.ID, connID, target, err)
 		lr.mux.RemoveConn(connID)

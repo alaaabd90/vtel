@@ -175,6 +175,23 @@ vtel's much smaller scale (5-20 bots, not Drive-account-scale parallelism).
   disconnect only via a stall timeout.
 - **Immediate SOCKS-layer rejects** (`socks5/reject.go`): fake-IP/benchmark-
   range/DNS-over-TLS-probe targets rejected before a wasted dial attempt.
+- **Exit-side DNS cache** (`tunnel/dnscache.go`, from `dnscache.go`): a
+  size-bounded (2048 entries) pos/neg-TTL cache in front of the resolver, so
+  a repeat target on the same server-side link skips a fresh DNS lookup.
+  Not ported: gdrive's address-family preference logic — that exists for
+  gdrive's mobile-tethering Happy-Eyeballs context, and vtel's
+  `RejectIPv6` default already made the opposite call.
+- **Throughput as a load-balancer tiebreak** (`pool/pool.go`, from a
+  historical `bytesScore` fix in `cmd/gdrive-exit/lb.go`, v1.0.91): pure
+  least-connections degenerates to round-robin once load fans out evenly,
+  since every link ends up with the same connection count regardless of
+  actual throughput. `Link.ThroughputBytesPerSec` (fed by the existing
+  per-link `Batcher.bytesPerSec` measurement) is consulted only as a
+  tiebreak among links already tied on active-stream count — deliberately
+  narrow. gdrive itself later reverted the *full* feature, not because the
+  tiebreak was wrong, but because it got bundled with heavier adaptive
+  bandwidth-cap/burst-controller machinery that caused real regressions;
+  none of that extra machinery is ported here.
 
 **Deliberately not ported**, with reasons:
 - **Upload-ID pre-reservation pool**: solves a specific Google Drive API
