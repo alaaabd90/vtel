@@ -19,10 +19,33 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+// sharedFallback signing: clients/android/keystore/vtel-shared.keystore.p12,
+// committed to the repo, used whenever the real VTEL_ANDROID_KEYSTORE_*
+// secrets aren't set (i.e. every build so far). This is deliberate, not an
+// oversight - the alternative is Android Gradle Plugin's own built-in
+// "debug" signingConfig, which auto-generates a fresh, different keypair
+// on any machine/CI runner that doesn't already have one cached at
+// ~/.android/debug.keystore. On a fresh GitHub Actions runner that's every
+// single run, so every release ends up signed with a different
+// certificate - and Android refuses to install an update over an existing
+// app unless the signing certificate matches exactly, silently keeping
+// whatever was already installed (no error shown) and forcing a full
+// uninstall to actually get the new build, wiping all local app data
+// (session files, saved config, known-accounts list) in the process. A
+// stable committed keystore fixes that permanently: every fallback-signed
+// build, from any machine, shares one certificate, so updates install
+// in place like normal. This keystore/password protect nothing sensitive
+// (vtel-android isn't distributed anywhere requiring real key secrecy) -
+// only "same cert every time" matters here, not confidentiality.
+val sharedFallbackKeystorePath = "../keystore/vtel-shared.keystore.p12"
+val sharedFallbackKeystorePassword = "9251ae1e245e53460665f1fc225ee1b7fb5ca5d806777515"
+val sharedFallbackKeyAlias = "vtelshared"
+
 if (!hasReleaseSigning) {
     logger.warn(
         "vtel: VTEL_ANDROID_KEYSTORE_* secrets not set - release APK will be " +
-            "debug-signed (installable for testing, not suitable for distribution)."
+            "signed with the committed shared fallback keystore (installable and " +
+            "updatable for testing, not suitable for a real distributed release)."
     )
 }
 val androidNativeAbis = listOf("arm64-v8a", "armeabi-v7a")
@@ -195,22 +218,30 @@ android {
                 keyPassword = releaseKeyPassword
             }
         }
+        create("sharedFallback") {
+            storeFile = file(sharedFallbackKeystorePath)
+            storePassword = sharedFallbackKeystorePassword
+            keyAlias = sharedFallbackKeyAlias
+            keyPassword = sharedFallbackKeystorePassword
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            // Fall back to the auto-generated debug signing config when no real
-            // release keystore secrets are configured, so assembleRelease still
-            // produces an APK Android will actually install (an unsigned APK is
-            // rejected with "package appears to be invalid"). Switches to real
-            // release signing automatically once VTEL_ANDROID_KEYSTORE_* secrets
-            // are set.
+            // Fall back to the committed shared keystore (see its doc comment
+            // above) when no real release keystore secrets are configured, so
+            // assembleRelease still produces an APK Android will actually
+            // install (an unsigned APK is rejected with "package appears to be
+            // invalid") *and* one that installs in place as an update over the
+            // previous build, instead of AGP's own ephemeral per-machine debug
+            // keystore. Switches to real release signing automatically once
+            // VTEL_ANDROID_KEYSTORE_* secrets are set.
             signingConfig = if (hasReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                signingConfigs.getByName("sharedFallback")
             }
         }
     }
