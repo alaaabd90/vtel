@@ -44,12 +44,19 @@ object VtelConfigStore {
         path(context).writeText(config.toString(2))
     }
 
-    fun addLink(context: Context, config: JSONObject, token: String, peerBotId: Long, channelId: Long): JSONObject {
+    // addAccountLink is the only guided way this app builds a link: a real
+    // MTProto account (see VtelAccountLogin) rather than a bot. kind:
+    // "account" matches vtelconfig.LinkConfig.IsAccount on the Go side - a
+    // bot-kind link (token/peer_bot_id) is still a valid shape the Go side
+    // accepts (e.g. from a config pasted via Import), just not one this
+    // app's own UI offers to build anymore.
+    fun addAccountLink(context: Context, config: JSONObject, session: String, peerUserId: Long, channelId: Long): JSONObject {
         val links = config.optJSONArray("links") ?: JSONArray()
         links.put(
             JSONObject().apply {
-                put("token", token)
-                put("peer_bot_id", peerBotId)
+                put("kind", "account")
+                put("session", session)
+                put("peer_user_id", peerUserId)
                 put("channel_id", channelId)
             },
         )
@@ -73,6 +80,36 @@ object VtelConfigStore {
 
     fun redactToken(token: String): String =
         if (token.length <= 10) "****" else token.take(6) + "..." + token.takeLast(4)
+
+    // getApiId/getApiHash/setApiCredentials manage telegram_api_id/
+    // telegram_api_hash - the MTProto app credentials from
+    // https://my.telegram.org every account-kind link needs (see
+    // vtelconfig.Config.TelegramAPIID/TelegramAPIHash), one pair shared by
+    // every account link in this config. The Account screen saves them here
+    // once so a second login doesn't require re-entering them.
+    fun getApiId(config: JSONObject): Int = config.optInt("telegram_api_id", 0)
+
+    fun getApiHash(config: JSONObject): String = config.optString("telegram_api_hash", "")
+
+    fun setApiCredentials(context: Context, config: JSONObject, apiId: Int, apiHash: String): JSONObject {
+        config.put("telegram_api_id", apiId)
+        config.put("telegram_api_hash", apiHash)
+        save(context, config)
+        return config
+    }
+
+    // sessionPathFor is where a phone number's session file (written by
+    // VtelAccountLogin) lives - the app's own private storage, so no
+    // cross-app file access is needed the way it would be if this pointed
+    // at a path like /root/vtel/accounts/... (that path doesn't exist and
+    // wouldn't be accessible from this app's sandbox anyway).
+    fun sessionPathFor(context: Context, phone: String): String {
+        val dir = File(context.filesDir, "accounts").apply { mkdirs() }
+        return File(dir, sanitizePhoneForFilename(phone) + ".session").absolutePath
+    }
+
+    private fun sanitizePhoneForFilename(phone: String): String =
+        phone.filter { it.isDigit() || it == '+' }
 
     private fun randomSecret(): String {
         val bytes = ByteArray(32)

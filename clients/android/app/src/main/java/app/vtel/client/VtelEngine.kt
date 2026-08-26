@@ -34,8 +34,7 @@ class VtelEngine(
         waitForPortRelease(listenHost, listenPort)
 
         val configFile = writeRuntimeConfig(configJson)
-        val engine = File(context.applicationInfo.nativeLibraryDir, ENGINE_NAME)
-        check(engine.exists()) { "vtel engine was not packaged at ${engine.absolutePath}" }
+        val engine = engineBinary(context)
 
         val logsDir = File(context.filesDir, "logs").apply { mkdirs() }
         val logFile = File(logsDir, LOG_FILE_NAME)
@@ -196,6 +195,17 @@ class VtelEngine(
         private const val TAG = "VtelEngine"
         private const val ENGINE_NAME = "libvtel.so"
         private const val LOG_FILE_NAME = "vtel.log"
+
+        // engineBinary resolves the same cmd/vtel binary this engine runs as
+        // the tunnel process - also used by VtelAccountLogin to invoke its
+        // `account login` subcommand, since it's the same executable with
+        // every CLI subcommand cmd/vtel's main.go dispatches, not just
+        // `-config <path>`.
+        fun engineBinary(context: Context): File {
+            val engine = File(context.applicationInfo.nativeLibraryDir, ENGINE_NAME)
+            check(engine.exists()) { "vtel engine was not packaged at ${engine.absolutePath}" }
+            return engine
+        }
 
         private fun tailOf(logFile: File): String =
             logFile.takeIf { it.exists() }
