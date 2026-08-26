@@ -117,12 +117,16 @@ func printUsage() {
 func runTunnel() {
 	cfg := ParseConfig()
 
-	specs, err := vtelconfig.BuildLinkSpecs(&cfg, func(i int, botID int64, err error) {
+	specs, err := vtelconfig.BuildLinkSpecs(&cfg, func(i int, ownID int64, err error) {
+		kind, idLabel := "bot", "bot ID"
+		if cfg.Links[i].IsAccount() {
+			kind, idLabel = "account", "user ID"
+		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to verify bot token for link %d: %v\n", i, err)
+			fmt.Fprintf(os.Stderr, "Failed to verify %s link %d: %v\n", kind, i, err)
 			return
 		}
-		fmt.Printf("[vtel] link %d: bot ID %d\n", i, botID)
+		fmt.Printf("[vtel] link %d: %s %d\n", i, idLabel, ownID)
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
