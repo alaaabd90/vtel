@@ -299,13 +299,17 @@ func (a *AccountAPI) onNewChannelMessage(ctx context.Context, _ tg.Entities, u *
 	if !ok || peerCh.ChannelID != a.channelID {
 		return nil
 	}
-	if a.peerUserID != 0 {
-		fromUser, ok := msg.FromID.(*tg.PeerUser)
-		if !ok || fromUser.UserID != a.peerUserID {
-			return nil
-		}
-	}
-
+	// Deliberately not filtering by msg.FromID here. Real Telegram channels
+	// (as opposed to supergroups) attribute posts to the channel itself,
+	// not to the individual admin's account - FromID is essentially never
+	// a *tg.PeerUser for a channel post, regardless of who posted it, so a
+	// peer-identity check against it silently drops every single message
+	// on both sides (confirmed live: sends succeed, nothing ever arrives,
+	// no error anywhere - CONNECT_ACK just times out forever). channel_id
+	// scoping above is what actually scopes this link to its dedicated
+	// channel; poller.go's own peer-ID-prefixed batch format (see its doc
+	// comment) is what excludes anything else posted there, including
+	// this account's own sends - both already do the job FromID can't.
 	cp := &ChannelPost{
 		MessageID: msg.ID,
 		Chat:      Chat{ID: -a.channelID - 1000000000000},
