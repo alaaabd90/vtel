@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -301,7 +303,10 @@ private fun AccountScreen(activity: ComponentActivity, config: JSONObject, onCon
         }
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Text("Account login", style = MaterialTheme.typography.titleMedium)
         Text(
             "vtel-android only connects through a real logged-in Telegram account, not a bot. " +
@@ -412,7 +417,10 @@ private fun SettingsScreen(activity: ComponentActivity, config: JSONObject, onCo
     var debug by remember { mutableStateOf(config.optBoolean("debug", true)) }
     var status by remember { mutableStateOf("") }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Text("Settings", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(value = secret, onValueChange = { secret = it }, label = { Text("Secret") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = listen, onValueChange = { listen = it }, label = { Text("SOCKS5 listen address") }, modifier = Modifier.fillMaxWidth())
