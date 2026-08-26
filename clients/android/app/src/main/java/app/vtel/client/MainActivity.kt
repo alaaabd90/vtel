@@ -297,17 +297,32 @@ private fun AccountScreen(activity: ComponentActivity, config: JSONObject, onCon
     var phone by remember { mutableStateOf("") }
     var codeInput by remember { mutableStateOf("") }
     var passwordInput by remember { mutableStateOf("") }
-    var peerUserId by remember { mutableStateOf("") }
-    var channelId by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("") }
 
     val login = remember { VtelAccountLogin(activity) }
     var loginState by remember { mutableStateOf<LoginState>(LoginState.Idle) }
+    var knownAccounts by remember { mutableStateOf(VtelConfigStore.loadKnownAccounts(activity)) }
 
     LaunchedEffect(Unit) {
         while (true) {
             loginState = login.state
             delay(400)
+        }
+    }
+
+    // Persist a completed login the instant it succeeds, independent of
+    // this screen's own state - see VtelConfigStore.addKnownAccount's doc
+    // comment for why: without this, the process getting killed before the
+    // user gets to enter the peer_user_id/channel_id (a real possibility -
+    // that data usually isn't available until someone else finishes their
+    // own login, which can take a while) meant redoing the SMS code step
+    // just to reach the "add link" form again, even though the login and
+    // its session file were already done.
+    LaunchedEffect(loginState) {
+        val s = loginState
+        if (s is LoginState.Success) {
+            VtelConfigStore.addKnownAccount(activity, phone.trim(), s.sessionPath, s.userId)
+            knownAccounts = VtelConfigStore.loadKnownAccounts(activity)
         }
     }
 
@@ -380,38 +395,64 @@ private fun AccountScreen(activity: ComponentActivity, config: JSONObject, onCon
             }
             is LoginState.Success -> Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Logged in. This account's user ID - give it to whoever is setting up the peer side:")
+                    Text("Logged in and saved below. This account's user ID - give it to whoever is setting up the peer side:")
                     Text(s.userId.toString(), style = MaterialTheme.typography.titleLarge)
-                    Text("Now enter the peer's own user ID (from their login) and the shared channel ID to add this link:")
-                    OutlinedTextField(value = peerUserId, onValueChange = { peerUserId = it }, label = { Text("Peer account user ID") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(
-                        value = channelId,
-                        onValueChange = { channelId = it },
-                        label = { Text("Channel ID") },
-                        supportingText = { Text("Always negative, e.g. -1001234567890 - a private channel both accounts have joined") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Button(onClick = {
-                        val peer = peerUserId.trim().toLongOrNull()
-                        val chan = channelId.trim().toLongOrNull()
-                        if (peer == null || chan == null) {
-                            status = "Enter valid numeric peer_user_id and channel_id"
-                            return@Button
-                        }
-                        if (chan > 0) {
-                            status = "Channel ID must be negative (Telegram channel/supergroup IDs always start with -100...) - did you drop the leading minus sign?"
-                            return@Button
-                        }
-                        VtelConfigStore.addAccountLink(activity, config, s.sessionPath, peer, chan)
-                        status = "Link added. Check the Links tab, then reconnect to apply."
-                        peerUserId = ""; channelId = ""; phone = ""
-                        onConfigChanged()
-                    }) { Text("Add link") }
                 }
             }
             LoginState.Idle -> {}
         }
         if (status.isNotEmpty()) Text(status)
+
+        if (knownAccounts.isNotEmpty()) {
+            Text("Logged-in accounts", style = MaterialTheme.typography.titleMedium)
+            Text("Add a link for any of these whenever you have the peer's user ID and the channel ID - this list survives even if a login gets interrupted before you get that far.")
+            for (acc in knownAccounts) {
+                KnownAccountCard(
+                    account = acc,
+                    onAddLink = { peer, chan ->
+                        VtelConfigStore.addAccountLink(activity, config, acc.session, peer, chan)
+                        status = "Link added for ${acc.phone}. Check the Links tab, then reconnect to apply."
+                        onConfigChanged()
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun KnownAccountCard(account: VtelConfigStore.KnownAccount, onAddLink: (peer: Long, channel: Long) -> Unit) {
+    var peerUserId by remember(account.phone) { mutableStateOf("") }
+    var channelId by remember(account.phone) { mutableStateOf("") }
+    var status by remember(account.phone) { mutableStateOf("") }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${account.phone}  (user ID ${account.userId})", style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(value = peerUserId, onValueChange = { peerUserId = it }, label = { Text("Peer account user ID") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                value = channelId,
+                onValueChange = { channelId = it },
+                label = { Text("Channel ID") },
+                supportingText = { Text("Always negative, e.g. -1001234567890 - a private channel both accounts have joined") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(onClick = {
+                val peer = peerUserId.trim().toLongOrNull()
+                val chan = channelId.trim().toLongOrNull()
+                if (peer == null || chan == null) {
+                    status = "Enter valid numeric peer_user_id and channel_id"
+                    return@Button
+                }
+                if (chan > 0) {
+                    status = "Channel ID must be negative (Telegram channel/supergroup IDs always start with -100...) - did you drop the leading minus sign?"
+                    return@Button
+                }
+                onAddLink(peer, chan)
+                peerUserId = ""; channelId = ""
+            }) { Text("Add link") }
+            if (status.isNotEmpty()) Text(status)
+        }
     }
 }
 

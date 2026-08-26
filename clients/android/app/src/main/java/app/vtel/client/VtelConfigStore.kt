@@ -111,6 +111,49 @@ object VtelConfigStore {
     private fun sanitizePhoneForFilename(phone: String): String =
         phone.filter { it.isDigit() || it == '+' }
 
+    // Known accounts: every phone number successfully logged in through
+    // this app, recorded the instant login succeeds - independent of
+    // vtel-config.json's links array and independent of the Account
+    // screen's own transient state. This is what lets the app remember a
+    // completed login even if the process is killed (backgrounding, low
+    // memory) before the user gets to fill in the peer_user_id/channel_id
+    // and actually add the link - without it, a reset mid-flow forced
+    // redoing the SMS code just to get back to the "add link" form, even
+    // though the login itself, and its session file, were already done.
+    private const val ACCOUNTS_FILE_NAME = "vtel-known-accounts.json"
+
+    data class KnownAccount(val phone: String, val session: String, val userId: Long)
+
+    private fun accountsFile(context: Context): File = File(context.filesDir, ACCOUNTS_FILE_NAME)
+
+    fun loadKnownAccounts(context: Context): List<KnownAccount> {
+        val file = accountsFile(context)
+        if (!file.exists()) return emptyList()
+        val arr = runCatching { JSONArray(file.readText()) }.getOrElse { return emptyList() }
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            KnownAccount(o.optString("phone"), o.optString("session"), o.optLong("user_id"))
+        }
+    }
+
+    fun addKnownAccount(context: Context, phone: String, session: String, userId: Long) {
+        // A re-login of the same phone replaces its old entry rather than
+        // duplicating it.
+        val updated = loadKnownAccounts(context).filterNot { it.phone == phone } +
+            KnownAccount(phone, session, userId)
+        val arr = JSONArray()
+        updated.forEach { acc ->
+            arr.put(
+                JSONObject().apply {
+                    put("phone", acc.phone)
+                    put("session", acc.session)
+                    put("user_id", acc.userId)
+                },
+            )
+        }
+        accountsFile(context).writeText(arr.toString(2))
+    }
+
     private fun randomSecret(): String {
         val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)
