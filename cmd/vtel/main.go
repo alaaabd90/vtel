@@ -57,6 +57,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "account":
+		if err := cmdAccount(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "config":
 		if err := cmdConfigShow(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -95,6 +100,7 @@ func printUsage() {
   vtel links                  list configured links
   vtel links add               add a link interactively
   vtel links remove <N>        remove link #N
+  vtel account login -phone <+1...>  log a real account into MTProto (one-time, interactive)
   vtel config                 show current config (secret redacted)
   vtel config --reveal-secret  show current config with the real secret
   vtel export [file]          print (or write) the full config JSON

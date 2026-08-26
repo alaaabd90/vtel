@@ -1,0 +1,19 @@
+{
+  "_comment": "Example CLIENT config using kind:\"account\" links (real Telegram user accounts via MTProto) instead of bots - see README.md's 'Real-account links' section. One link here = one pair of real phone numbers (this side's account + the peer side's account) sharing one private channel. Steps: 1) get telegram_api_id/telegram_api_hash from https://my.telegram.org (once, shared by every account link). 2) `vtel account login -phone +15551234567` on this side and on the peer side - each prints its own numeric user ID and a session file path. 3) fill in session (this side's session path), peer_user_id (the OTHER side's printed user ID), and channel_id (a private channel both accounts have joined and can post in) below. The server-side config is the mirror image: its own session/peer_user_id swapped.",
+  "mode": "client",
+  "listen": "127.0.0.1:1080",
+  "secret": "REPLACE_WITH_A_LONG_RANDOM_SECRET",
+  "compression_level": "fastest",
+  "reject_ipv6": false,
+  "quiet_hours": null,
+  "telegram_api_id": 0,
+  "telegram_api_hash": "REPLACE_WITH_API_HASH_FROM_MY_TELEGRAM_ORG",
+  "links": [
+    {
+      "kind": "account",
+      "session": "/root/vtel/accounts/+15551234567.session",
+      "peer_user_id": 7000000001,
+      "channel_id": -1001000000000
+    }
+  ]
+}

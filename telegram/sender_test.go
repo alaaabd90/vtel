@@ -12,7 +12,7 @@ func TestSenderUsesTextAtExactMessageLimit(t *testing.T) {
 	t.Parallel()
 
 	var messageCalls, documentCalls int
-	api := &API{
+	api := &BotAPI{
 		token: "test",
 		client: &http.Client{
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -47,7 +47,7 @@ func TestSenderFallsBackToDocumentWhenEncodedTextIsTooLong(t *testing.T) {
 	t.Parallel()
 
 	var messageCalls, documentCalls int
-	api := &API{
+	api := &BotAPI{
 		token: "test",
 		client: &http.Client{
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {

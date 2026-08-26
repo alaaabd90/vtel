@@ -36,7 +36,7 @@ func rotatingFilename(botID int64, seq uint64) string {
 
 // Sender sends batches to Telegram with rate limiting.
 type Sender struct {
-	api       *API
+	api       API
 	botID     int64
 	channelID int64
 	limiter   *RateLimiter
@@ -44,7 +44,7 @@ type Sender struct {
 	retry429Count atomic.Int64 // for cmd/vtel-bench's 429-frequency-per-bot metric
 }
 
-func NewSender(api *API, botID int64, channelID int64) *Sender {
+func NewSender(api API, botID int64, channelID int64) *Sender {
 	return &Sender{
 		api:       api,
 		botID:     botID,

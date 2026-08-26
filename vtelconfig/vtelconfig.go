@@ -14,12 +14,33 @@ import (
 	"github.com/alaaabd90/vtel/tunnel"
 )
 
-// LinkConfig describes one bot/channel pair used as an independent tunnel
-// link (a "lane" in the pool).
+// LinkConfig describes one bot/channel pair, or one real-account/channel
+// pair, used as an independent tunnel link (a "lane" in the pool).
 type LinkConfig struct {
-	Token     string `json:"token"`
-	PeerBotID int64  `json:"peer_bot_id"`
-	ChannelID int64  `json:"channel_id"`
+	// Kind selects the transport: "bot" (default, Bot API via Token/
+	// PeerBotID) or "account" (MTProto via a real logged-in user account,
+	// Session/PeerUserID). Defaults to "bot" when empty so existing configs
+	// keep working unchanged.
+	Kind string `json:"kind,omitempty"`
+
+	// Bot-kind fields.
+	Token     string `json:"token,omitempty"`
+	PeerBotID int64  `json:"peer_bot_id,omitempty"`
+
+	// Account-kind fields. Session is the path to a session file written by
+	// `vtel account login`; PeerUserID is the peer account's real Telegram
+	// user ID (the account-kind counterpart to PeerBotID, printed by
+	// `vtel account login` on the peer side).
+	Session    string `json:"session,omitempty"`
+	PeerUserID int64  `json:"peer_user_id,omitempty"`
+
+	ChannelID int64 `json:"channel_id"`
+}
+
+// IsAccount reports whether this link uses the MTProto/real-account
+// transport rather than the Bot API.
+func (l LinkConfig) IsAccount() bool {
+	return l.Kind == "account"
 }
 
 // Config is the JSON-driven configuration for a vtel client or server.
@@ -30,6 +51,14 @@ type Config struct {
 	// Secret derives the AEAD key used to encrypt every batch - one shared
 	// secret across the pool.
 	Secret string `json:"secret"`
+
+	// TelegramAPIID/TelegramAPIHash are the MTProto application credentials
+	// from https://my.telegram.org, required only if any link is
+	// kind:"account". One pair is shared by every account link in the
+	// process - unlike bot tokens, these identify the *application*, not
+	// an individual account.
+	TelegramAPIID   int    `json:"telegram_api_id,omitempty"`
+	TelegramAPIHash string `json:"telegram_api_hash,omitempty"`
 
 	// CompressionLevel is one of "fastest" (default), "default", "better",
 	// or "best" - see protocol.ParseCompressionLevel.
@@ -77,12 +106,25 @@ func Validate(c *Config) error {
 	if c.Mode == "client" && c.Listen == "" {
 		c.Listen = "127.0.0.1:1080"
 	}
+	var needsAPICreds bool
 	for i, l := range c.Links {
-		if l.Token == "" {
-			return fmt.Errorf("links[%d].token is required", i)
-		}
-		if l.PeerBotID == 0 {
-			return fmt.Errorf("links[%d].peer_bot_id is required", i)
+		if l.IsAccount() {
+			needsAPICreds = true
+			if l.Session == "" {
+				return fmt.Errorf("links[%d].session is required for kind \"account\"", i)
+			}
+			if l.PeerUserID == 0 {
+				return fmt.Errorf("links[%d].peer_user_id is required for kind \"account\"", i)
+			}
+		} else if l.Kind != "" && l.Kind != "bot" {
+			return fmt.Errorf("links[%d].kind must be \"bot\" or \"account\", got %q", i, l.Kind)
+		} else {
+			if l.Token == "" {
+				return fmt.Errorf("links[%d].token is required", i)
+			}
+			if l.PeerBotID == 0 {
+				return fmt.Errorf("links[%d].peer_bot_id is required", i)
+			}
 		}
 		if l.ChannelID == 0 {
 			return fmt.Errorf("links[%d].channel_id is required", i)
@@ -96,6 +138,9 @@ func Validate(c *Config) error {
 		if l.ChannelID > 0 {
 			return fmt.Errorf("links[%d].channel_id must be negative (Telegram channel/supergroup IDs always start with -100...) - got %d, did you drop the leading minus sign?", i, l.ChannelID)
 		}
+	}
+	if needsAPICreds && (c.TelegramAPIID == 0 || c.TelegramAPIHash == "") {
+		return fmt.Errorf("telegram_api_id and telegram_api_hash are required when any link is kind \"account\" (get them from https://my.telegram.org)")
 	}
 	return nil
 }
@@ -116,23 +161,41 @@ func BuildLinkSpecs(c *Config, progress func(index int, botID int64, err error))
 
 	specs := make([]tunnel.LinkSpec, 0, len(c.Links))
 	for i, lc := range c.Links {
-		api := telegram.NewAPI(lc.Token)
-		me, err := api.GetMe()
-		if progress != nil {
-			var id int64
-			if me != nil {
-				id = me.ID
+		var (
+			api       telegram.API
+			ownID     int64
+			peerID    int64
+			verifyErr error
+		)
+		if lc.IsAccount() {
+			acct, err := telegram.NewAccountAPI(c.TelegramAPIID, c.TelegramAPIHash, lc.Session, lc.ChannelID, lc.PeerUserID)
+			if err == nil {
+				var me *telegram.User
+				me, err = acct.GetMe()
+				if err == nil {
+					ownID = me.ID
+				}
 			}
-			progress(i, id, err)
+			api, peerID, verifyErr = acct, lc.PeerUserID, err
+		} else {
+			bot := telegram.NewAPI(lc.Token)
+			me, err := bot.GetMe()
+			if err == nil {
+				ownID = me.ID
+			}
+			api, peerID, verifyErr = bot, lc.PeerBotID, err
 		}
-		if err != nil {
-			return nil, fmt.Errorf("link %d: verify bot token: %w", i, err)
+		if progress != nil {
+			progress(i, ownID, verifyErr)
+		}
+		if verifyErr != nil {
+			return nil, fmt.Errorf("link %d: verify %s link: %w", i, linkKindLabel(lc), verifyErr)
 		}
 		specs = append(specs, tunnel.LinkSpec{
 			ID:               i,
 			API:              api,
-			BotID:            me.ID,
-			PeerBotID:        lc.PeerBotID,
+			BotID:            ownID,
+			PeerBotID:        peerID,
 			ChannelID:        lc.ChannelID,
 			Key:              key,
 			CompressionLevel: level,
@@ -140,4 +203,11 @@ func BuildLinkSpecs(c *Config, progress func(index int, botID int64, err error))
 		})
 	}
 	return specs, nil
+}
+
+func linkKindLabel(lc LinkConfig) string {
+	if lc.IsAccount() {
+		return "account"
+	}
+	return "bot"
 }

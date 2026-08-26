@@ -10,7 +10,7 @@ import (
 // ID must be unique within a Client/Server's set of links.
 type LinkSpec struct {
 	ID               int
-	API              *telegram.API
+	API              telegram.API
 	BotID            int64
 	PeerBotID        int64
 	ChannelID        int64
@@ -24,7 +24,7 @@ type LinkSpec struct {
 // health/load tracking, keeping pool decoupled from tunnel/protocol/telegram.
 type linkRuntime struct {
 	link    *pool.Link
-	api     *telegram.API
+	api     telegram.API
 	sender  *telegram.Sender
 	poller  *telegram.Poller
 	mux     *Mux

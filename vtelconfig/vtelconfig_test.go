@@ -97,6 +97,48 @@ func TestValidateRejectsPositiveChannelID(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsAccountLinkWithAPICreds(t *testing.T) {
+	c := validConfig()
+	c.TelegramAPIID = 12345
+	c.TelegramAPIHash = "hash"
+	c.Links = []LinkConfig{
+		{Kind: "account", Session: "accounts/+15551234567.session", PeerUserID: 999, ChannelID: -100},
+	}
+	if err := Validate(&c); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a well-formed account link", err)
+	}
+}
+
+func TestValidateRejectsAccountLinkWithoutAPICreds(t *testing.T) {
+	c := validConfig()
+	c.Links = []LinkConfig{
+		{Kind: "account", Session: "accounts/+15551234567.session", PeerUserID: 999, ChannelID: -100},
+	}
+	if err := Validate(&c); err == nil {
+		t.Fatal("Validate() = nil, want error when an account link is present but telegram_api_id/hash are missing")
+	}
+}
+
+func TestValidateRejectsAccountLinkMissingSession(t *testing.T) {
+	c := validConfig()
+	c.TelegramAPIID = 12345
+	c.TelegramAPIHash = "hash"
+	c.Links = []LinkConfig{
+		{Kind: "account", PeerUserID: 999, ChannelID: -100},
+	}
+	if err := Validate(&c); err == nil {
+		t.Fatal("Validate() = nil, want error for account link missing session")
+	}
+}
+
+func TestValidateRejectsUnknownLinkKind(t *testing.T) {
+	c := validConfig()
+	c.Links[0].Kind = "smoke-signal"
+	if err := Validate(&c); err == nil {
+		t.Fatal("Validate() = nil, want error for unknown link kind")
+	}
+}
+
 // BuildLinkSpecs always calls telegram.NewAPI (the real api.telegram.org
 // host) internally - it has no seam to point at a fake server, so these
 // tests only cover the paths that fail before/without a real network call:

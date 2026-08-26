@@ -75,6 +75,38 @@ this. See `config.example.json` for the config shape (it shows the spec's
 originally-discussed default of 5 channels × 4 bots = 20 links, purely to
 illustrate the format at scale).
 
+### Real-account links (MTProto, no bot)
+
+Every link above uses the Bot API. A link can instead use `kind:
+"account"`: a real, logged-in Telegram user account (a real phone number)
+talking MTProto directly, instead of a bot token talking HTTP. This exists
+because the Bot API path has real, hard ceilings — see "Honest limits"
+below — that don't apply the same way to a real account, at the cost of a
+heavier, less-tested transport (see the honest gaps called out there too).
+
+1. Get one `api_id`/`api_hash` pair from <https://my.telegram.org> (log in,
+   create an "app"). This identifies *your application*, not an account —
+   one pair is shared by every account link you run, bot or not.
+2. Log each phone number in, once, on the machine that will run it:
+   ```
+   vtel account login -phone +15551234567 -api-id <id> -api-hash <hash>
+   ```
+   This is interactive: Telegram sends a login code to that number and
+   `vtel account login` prompts for it on stdin (and for the account's 2FA
+   password, if it has cloud password enabled). On success it writes a
+   session file and prints the account's numeric user ID — give that ID to
+   whoever is setting up the *peer* side, they need it as `peer_user_id`.
+3. Create (or reuse) a private channel and add both accounts to it as
+   members able to post — same role the two bots' admin membership plays
+   for a bot link.
+4. Add the link: `vtel links add`, choose kind `account`, and supply the
+   session file path + the peer's user ID + the channel ID. Or edit the
+   config directly — see `config.example.account.json`.
+
+A config can mix `kind: "bot"` and `kind: "account"` links in the same
+pool, or use only one kind — the pool doesn't care, it health-routes across
+whatever links are configured.
+
 ## Build
 
 ```
@@ -212,7 +244,8 @@ curl -x socks5h://127.0.0.1:1080 https://ipv4.ident.me
 | `reject_ipv6` | Client only: immediately reject IPv6 literal SOCKS targets | `false` |
 | `quiet_hours` | `{start_hour, end_hour, timezone}` — widens the flush cadence during this daily window instead of pausing (see Traffic shaping below) | disabled |
 | `debug` | Verbose `[debug]`-prefixed tracing across every package (mux frames, pool link picks, batch flushes, DNS cache) — see Debugging below | `false` (Android app default: `true`) |
-| `links` | Array of `{token, peer_bot_id, channel_id}` | required, ≥1 |
+| `telegram_api_id` / `telegram_api_hash` | MTProto app credentials from <https://my.telegram.org> — required only if any link is `kind: "account"` | required only for account links |
+| `links` | Array of links — bot-kind: `{token, peer_bot_id, channel_id}`; account-kind: `{kind: "account", session, peer_user_id, channel_id}` — see "Real-account links" above | required, ≥1 |
 
 ## CLI reference
 
@@ -228,7 +261,8 @@ env var) and manages a systemd unit named `vtel`.
 | `vtel status` | service state + config summary |
 | `vtel restart` | restart the systemd service |
 | `vtel logs` | follow live journal (`journalctl -u vtel -f`) |
-| `vtel links` / `links add` / `links remove <N>` | list/add/remove bot links |
+| `vtel links` / `links add` / `links remove <N>` | list/add/remove links (bot or account kind) |
+| `vtel account login -phone <+1...>` | interactively log a real phone number into MTProto and write its session file — see "Real-account links" |
 | `vtel config` / `config --reveal-secret` | show current config (secret redacted by default) |
 | `vtel export [file]` | print (or write) the full config JSON |
 | `vtel update` | download and install the latest GitHub release |
@@ -425,6 +459,19 @@ vtel's much smaller scale (5-20 bots, not Drive-account-scale parallelism).
   harness), real network latency's effect on the adaptive batching tiers,
   and whether 20 concurrent bots on one channel trigger any Telegram-side
   throttling this design doesn't yet account for.
+- **Account-kind links (MTProto) are even less tested than the bot path**:
+  `AccountAPI` (`telegram/account.go`) is unit-tested for its own new
+  logic (the offset/timeout buffering that fakes Bot API-style polling on
+  top of MTProto's push updates), and builds clean against the real
+  `gotd/td` library, but — unlike the bot path — there is no
+  `faketelegram`-equivalent fake for MTProto to smoke-test it against, so
+  it has *never run end to end*: not against a real account, not against
+  Telegram's real MTProto servers. Real accounts' actual flood-wait/rate
+  limits under sustained tunnel-scale traffic are genuinely unknown — that
+  empirical answer is the whole point of testing it. `resolvePeer` also
+  only scans an account's first 100 dialogs to find the shared channel's
+  access hash; fine for a small dedicated tunnel account, not for one with
+  a large existing dialog list.
 - **`go test -race` now passes clean across the whole suite** (a C compiler
   wasn't available earlier in development; once one was, `-race` — including
   the concurrent flush-dispatch/buffer-pool/backpressure code from later

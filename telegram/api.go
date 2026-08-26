@@ -31,21 +31,34 @@ var sharedTransport = &http.Transport{
 	TLSHandshakeTimeout: 30 * time.Second,
 }
 
-type API struct {
+// API is the transport contract vtel's Sender/Poller/pool depend on. BotAPI
+// (this file) implements it over the Telegram Bot API; AccountAPI
+// (account.go) implements it over MTProto/real user accounts - both are
+// otherwise indistinguishable to the rest of the codebase.
+type API interface {
+	SendMessage(channelID int64, text string) (retryAfter int, err error)
+	SendDocument(channelID int64, filename string, data []byte) (retryAfter int, err error)
+	GetUpdates(offset int, timeout int) ([]Update, error)
+	DownloadFile(fileID string) ([]byte, error)
+	GetMe() (*User, error)
+	WarmConnection() error
+}
+
+type BotAPI struct {
 	token    string
 	hostBase string // scheme+host only, e.g. "https://api.telegram.org"; overridable for tests
 	client   *http.Client
 }
 
-func NewAPI(token string) *API {
+func NewAPI(token string) *BotAPI {
 	return NewAPIWithHost(token, defaultHostBase)
 }
 
 // NewAPIWithHost is NewAPI with an overridable host, for pointing at an
 // in-memory fake Telegram server in tests/smoketests - never used against a
 // real bot token in production.
-func NewAPIWithHost(token, hostBase string) *API {
-	return &API{
+func NewAPIWithHost(token, hostBase string) *BotAPI {
+	return &BotAPI{
 		token:    token,
 		hostBase: hostBase,
 		client: &http.Client{
@@ -58,12 +71,12 @@ func NewAPIWithHost(token, hostBase string) *API {
 // WarmConnection performs a cheap no-op API call purely to keep this bot's
 // connection in sharedTransport's idle pool warm - and, as a side effect,
 // verify reachability. Called periodically by pool.Pool.RunWarmup.
-func (a *API) WarmConnection() error {
+func (a *BotAPI) WarmConnection() error {
 	_, err := a.GetMe()
 	return err
 }
 
-func (a *API) botURL(method string) string {
+func (a *BotAPI) botURL(method string) string {
 	return a.hostBase + "/bot" + a.token + "/" + method
 }
 
@@ -136,7 +149,7 @@ func newAPIError(result apiResponse) *apiError {
 }
 
 // SendDocument uploads a document to a channel. Returns retry_after on 429.
-func (a *API) SendDocument(channelID int64, filename string, data []byte) (retryAfter int, err error) {
+func (a *BotAPI) SendDocument(channelID int64, filename string, data []byte) (retryAfter int, err error) {
 	if len(data) > MaxSendDocumentSize {
 		return 0, fmt.Errorf("document size %d exceeds Telegram 50MB limit", len(data))
 	}
@@ -184,7 +197,7 @@ func (a *API) SendDocument(channelID int64, filename string, data []byte) (retry
 }
 
 // SendMessage sends a text message to a channel. Returns retry_after on 429.
-func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err error) {
+func (a *BotAPI) SendMessage(channelID int64, text string) (retryAfter int, err error) {
 	payload := struct {
 		ChatID int64  `json:"chat_id"`
 		Text   string `json:"text"`
@@ -221,7 +234,7 @@ func (a *API) SendMessage(channelID int64, text string) (retryAfter int, err err
 }
 
 // GetUpdates long-polls for updates.
-func (a *API) GetUpdates(offset int, timeout int) ([]Update, error) {
+func (a *BotAPI) GetUpdates(offset int, timeout int) ([]Update, error) {
 	url := fmt.Sprintf("%s?offset=%d&timeout=%d&allowed_updates=[\"channel_post\"]",
 		a.botURL("getUpdates"), offset, timeout)
 
@@ -248,7 +261,7 @@ func (a *API) GetUpdates(offset int, timeout int) ([]Update, error) {
 }
 
 // DownloadFile downloads a file by file_id.
-func (a *API) DownloadFile(fileID string) ([]byte, error) {
+func (a *BotAPI) DownloadFile(fileID string) ([]byte, error) {
 	// Step 1: getFile to get file_path
 	url := fmt.Sprintf("%s?file_id=%s", a.botURL("getFile"), fileID)
 	resp, err := a.client.Get(url)
@@ -283,7 +296,7 @@ func (a *API) DownloadFile(fileID string) ([]byte, error) {
 }
 
 // GetMe returns this bot's user info.
-func (a *API) GetMe() (*User, error) {
+func (a *BotAPI) GetMe() (*User, error) {
 	url := a.botURL("getMe")
 	resp, err := a.client.Get(url)
 	if err != nil {

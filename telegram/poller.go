@@ -17,7 +17,7 @@ const (
 
 // Poller long-polls for channel_post updates from the peer bot.
 type Poller struct {
-	api       *API
+	api       API
 	peerBotID int64
 	channelID int64
 	offset    int
@@ -25,7 +25,7 @@ type Poller struct {
 	done      chan struct{}
 }
 
-func NewPoller(api *API, peerBotID int64, channelID int64) *Poller {
+func NewPoller(api API, peerBotID int64, channelID int64) *Poller {
 	return &Poller{
 		api:       api,
 		peerBotID: peerBotID,
