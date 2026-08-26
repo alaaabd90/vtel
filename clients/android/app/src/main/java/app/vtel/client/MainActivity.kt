@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -155,7 +156,14 @@ private fun AppScreen(activity: ComponentActivity) {
             }
         },
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
+        // imePadding() reserves space for the on-screen keyboard explicitly.
+        // targetSdk 35 forces edge-to-edge for every app, which makes the
+        // old windowSoftInputMode="adjustResize"/"adjustPan" manifest flags
+        // unreliable - without this, the keyboard just overlays as a fixed
+        // panel and a scrollable Column has no extra space to scroll into,
+        // permanently hiding whatever's underneath it (this is what made
+        // the Account screen's code-entry field unreachable).
+        Column(modifier = Modifier.fillMaxSize().padding(padding).imePadding().padding(16.dp)) {
             when (screen) {
                 Screen.STATUS -> StatusScreen(
                     config = config,
